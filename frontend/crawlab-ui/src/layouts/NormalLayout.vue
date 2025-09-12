@@ -6,29 +6,31 @@ const store = useStore();
 const { layout: state } = store.state as RootStoreState;
 
 const sidebarCollapsed = computed<boolean>(() => state.sidebarCollapsed);
-const chatSidebarVisible = computed<boolean>(() => state.chatbotSidebarVisible);
-const chatSidebarWidth = computed<number>(() => state.chatbotSidebarWidth);
+// Temporarily commented out - AI chat features are WIP
+// const chatSidebarVisible = computed<boolean>(() => state.chatbotSidebarVisible);
+// const chatSidebarWidth = computed<number>(() => state.chatbotSidebarWidth);
 
-const closeChatSidebar = () => {
-  store.commit('layout/setChatbotSidebarVisible', false);
-};
+// const closeChatSidebar = () => {
+//   store.commit('layout/setChatbotSidebarVisible', false);
+// };
 
-const resizeChatSidebar = (width: number) => {
-  store.commit('layout/setChatbotSidebarWidth', width);
-};
+// const resizeChatSidebar = (width: number) => {
+//   store.commit('layout/setChatbotSidebarWidth', width);
+// };
 
-const chatSidebarResizing = ref(false);
+// const chatSidebarResizing = ref(false);
 
 // Make sure the chatbotSidebarWidth is initialized from localStorage
 onBeforeMount(() => {
   store.dispatch('common/getMe');
 
-  // Ensure sidebar width is initialized from localStorage
-  const storedWidth = localStorage.getItem('chatbotSidebarWidth');
-  if (storedWidth) {
-    const width = parseInt(storedWidth);
-    store.commit('layout/setChatbotSidebarWidth', width);
-  }
+  // Temporarily commented out - AI chat features are WIP
+  // // Ensure sidebar width is initialized from localStorage
+  // const storedWidth = localStorage.getItem('chatbotSidebarWidth');
+  // if (storedWidth) {
+  //   const width = parseInt(storedWidth);
+  //   store.commit('layout/setChatbotSidebarWidth', width);
+  // }
 });
 
 defineOptions({ name: 'ClNormalLayout' });
@@ -40,10 +42,8 @@ defineOptions({ name: 'ClNormalLayout' });
     <div
       :class="[
         sidebarCollapsed ? 'collapsed' : '',
-        chatSidebarResizing ? 'chat-resizing' : '',
       ]"
       class="main-content"
-      :style="chatSidebarVisible ? { right: `${chatSidebarWidth}px` } : {}"
     >
       <cl-header />
       <cl-tabs-view />
@@ -51,6 +51,8 @@ defineOptions({ name: 'ClNormalLayout' });
         <router-view />
       </div>
     </div>
+    <!-- Temporarily commented out - AI chat features are WIP -->
+    <!--
     <cl-chat-sidebar
       :visible="chatSidebarVisible"
       :default-width="chatSidebarWidth"
@@ -64,6 +66,7 @@ defineOptions({ name: 'ClNormalLayout' });
         @close="closeChatSidebar"
       />
     </cl-chat-sidebar>
+    -->
   </div>
 </template>
 
