@@ -18,6 +18,12 @@ func (r *Runner) writeLogLines(lines []string) {
 	default:
 	}
 
+	// Check circuit breaker for log connections
+	if !r.isLogCircuitClosed() {
+		// Circuit is open, don't attempt to send logs to prevent flooding
+		return
+	}
+
 	// Use connection with mutex for thread safety
 	r.connMutex.RLock()
 	conn := r.conn
@@ -26,6 +32,7 @@ func (r *Runner) writeLogLines(lines []string) {
 	// Check if connection is available
 	if conn == nil {
 		r.Debugf("no connection available for sending log lines")
+		r.recordLogFailure()
 		return
 	}
 
@@ -47,12 +54,16 @@ func (r *Runner) writeLogLines(lines []string) {
 		case <-r.ctx.Done():
 			return
 		default:
-			r.Errorf("error sending log lines: %v", err)
+			// Record failure and open circuit breaker if needed
+			r.recordLogFailure()
 			// Mark connection as unhealthy for reconnection
 			r.lastConnCheck = time.Time{}
 		}
 		return
 	}
+
+	// Success - reset circuit breaker
+	r.recordLogSuccess()
 }
 
 // logInternally sends internal runner logs to the same logging system as the task
@@ -68,7 +79,8 @@ func (r *Runner) logInternally(level string, message string) {
 
 	// Send to the same log system as task logs
 	// Only send if context is not cancelled and connection is available
-	if r.conn != nil {
+	// AND circuit breaker allows it (prevents cascading log failures)
+	if r.conn != nil && r.isLogCircuitClosed() {
 		select {
 		case <-r.ctx.Done():
 			// Context cancelled, don't send logs
@@ -128,4 +140,62 @@ func (r *Runner) Infof(format string, args ...interface{}) {
 func (r *Runner) Debugf(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	r.logInternally("DEBUG", msg)
+}
+
+// Circuit breaker methods for log connection management
+
+// isLogCircuitClosed checks if the circuit breaker allows log sending
+func (r *Runner) isLogCircuitClosed() bool {
+	r.logConnMutex.RLock()
+	defer r.logConnMutex.RUnlock()
+
+	// If circuit was opened due to failures, check if enough time has passed to retry
+	if !r.logConnHealthy {
+		if time.Since(r.logCircuitOpenTime) > r.logCircuitOpenDuration {
+			// Time to retry - close the circuit
+			r.logConnMutex.RUnlock()
+			r.logConnMutex.Lock()
+			r.logConnHealthy = true
+			r.logFailureCount = 0
+			r.logConnMutex.Unlock()
+			r.logConnMutex.RLock()
+			return true
+		}
+		return false
+	}
+
+	return true
+}
+
+// recordLogFailure records a log sending failure and opens circuit if threshold reached
+func (r *Runner) recordLogFailure() {
+	r.logConnMutex.Lock()
+	defer r.logConnMutex.Unlock()
+
+	r.logFailureCount++
+	r.lastLogSendFailure = time.Now()
+
+	// Open circuit breaker after 3 consecutive failures to prevent log flooding
+	if r.logFailureCount >= 3 && r.logConnHealthy {
+		r.logConnHealthy = false
+		r.logCircuitOpenTime = time.Now()
+		// Log this through standard logger only (not through writeLogLines to avoid recursion)
+		r.Logger.Warn(fmt.Sprintf("log circuit breaker opened after %d failures, suppressing log sends for %v", 
+			r.logFailureCount, r.logCircuitOpenDuration))
+	}
+}
+
+// recordLogSuccess records a successful log send and resets the circuit breaker
+func (r *Runner) recordLogSuccess() {
+	r.logConnMutex.Lock()
+	defer r.logConnMutex.Unlock()
+
+	if !r.logConnHealthy || r.logFailureCount > 0 {
+		// Circuit was open or had failures, now closing it
+		if !r.logConnHealthy {
+			r.Logger.Info("log circuit breaker closed - connection restored")
+		}
+		r.logConnHealthy = true
+		r.logFailureCount = 0
+	}
 }

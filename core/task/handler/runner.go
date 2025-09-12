@@ -52,6 +52,9 @@ func newTaskRunner(id primitive.ObjectID, svc *Service) (r *Runner, err error) {
 		ipcTimeout:          60 * time.Second, // generous timeout for all tasks
 		healthCheckInterval: 5 * time.Second,  // check process every 5 seconds
 		connHealthInterval:  60 * time.Second, // check connection health every minute
+		// initialize circuit breaker for log connections
+		logConnHealthy:         true,
+		logCircuitOpenDuration: 30 * time.Second, // keep circuit open for 30 seconds after failures
 	}
 
 	// multi error
@@ -132,6 +135,14 @@ type Runner struct {
 	maxConnRetries    int           // maximum connection retry attempts
 	connRetryDelay    time.Duration // delay between connection retries
 	resourceCleanup   *time.Ticker  // periodic resource cleanup
+
+	// circuit breaker for log connections to prevent cascading failures
+	logConnHealthy         bool          // tracks if log connection is healthy
+	logConnMutex          sync.RWMutex  // mutex for log connection health state
+	lastLogSendFailure    time.Time     // last time log send failed
+	logCircuitOpenTime    time.Time     // when circuit breaker was opened
+	logFailureCount       int           // consecutive log send failures
+	logCircuitOpenDuration time.Duration // how long to keep circuit open after failures
 
 	// configurable timeouts for robust task execution
 	ipcTimeout          time.Duration // timeout for IPC operations
@@ -668,6 +679,16 @@ func (r *Runner) reconnectWithRetry() error {
 		r.lastConnCheck = time.Now()
 		r.connRetryAttempts = 0
 		r.Infof("successfully reconnected to task service after %d attempts", attempt+1)
+		
+		// Reset log circuit breaker when connection is restored
+		r.logConnMutex.Lock()
+		if !r.logConnHealthy {
+			r.logConnHealthy = true
+			r.logFailureCount = 0
+			r.Logger.Info("log circuit breaker reset after successful reconnection")
+		}
+		r.logConnMutex.Unlock()
+		
 		return nil
 	}
 
