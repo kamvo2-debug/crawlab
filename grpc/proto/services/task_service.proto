@@ -22,6 +22,7 @@ message TaskServiceSubscribeResponse {
 enum TaskServiceConnectCode {
   INSERT_DATA = 0;
   INSERT_LOGS = 1;
+  PING = 2;
 }
 
 message TaskServiceConnectRequest {

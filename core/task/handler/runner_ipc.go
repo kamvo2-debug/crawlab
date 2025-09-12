@@ -157,6 +157,9 @@ func (r *Runner) handleIPCInsertDataMessage(ipcMsg entity.IPCMessage) {
 			}
 			return
 		}
+
+		// Update last successful connection time to help health check avoid unnecessary pings
+		r.lastConnCheck = time.Now()
 	}
 }
 
