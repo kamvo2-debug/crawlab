@@ -303,7 +303,7 @@ const useNodeList = () => {
           icon: ['fa', 'chart-line'],
           width: '240',
           value: (row: Node) => {
-            if (!row._id) return;
+            if (!row._id || !state.nodeMetricsMap) return;
             const currentMetrics = state.nodeMetricsMap[row._id];
             return (
               <ClCurrentMetrics
@@ -400,7 +400,7 @@ const useNodeList = () => {
   const opts = getDefaultUseListOptions<Node>(navActions, tableColumns);
 
   // init
-  setupListComponent(ns, store, []);
+  setupListComponent(ns, store, true);
 
   if (isPro()) {
     onBeforeMount(() => store.dispatch(`${ns}/getNodeMetrics`));
