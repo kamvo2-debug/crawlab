@@ -38,6 +38,7 @@ const task: LComponentsTask = {
       error: 'Error',
       cancelled: 'Cancelled',
       abnormal: 'Abnormal',
+      nodeDisconnected: 'Node Disconnected',
       unknown: 'Unknown',
     },
     tooltip: {
@@ -48,6 +49,7 @@ const task: LComponentsTask = {
       error: 'Task ended with an error:',
       cancelled: 'Task has been cancelled',
       abnormal: 'Task ended abnormally',
+      nodeDisconnected: 'Task temporarily disconnected due to worker node offline',
       unknown: 'Unknown task status',
     },
   },

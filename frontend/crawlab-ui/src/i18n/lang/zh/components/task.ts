@@ -38,6 +38,7 @@ const task: LComponentsTask = {
       error: '错误',
       cancelled: '已取消',
       abnormal: '异常',
+      nodeDisconnected: '节点断开',
       unknown: '未知',
     },
     tooltip: {
@@ -48,6 +49,7 @@ const task: LComponentsTask = {
       error: '任务发生错误:',
       cancelled: '任务已被取消',
       abnormal: '任务异常终止',
+      nodeDisconnected: '任务因工作节点离线而临时断开',
       unknown: '未知任务状态',
     },
   },

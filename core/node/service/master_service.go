@@ -28,13 +28,15 @@ import (
 
 type MasterService struct {
 	// dependencies
-	cfgSvc           interfaces.NodeConfigService
-	server           *server.GrpcServer
-	taskSchedulerSvc *scheduler.Service
-	taskHandlerSvc   *handler.Service
-	scheduleSvc      *schedule.Service
-	systemSvc        *system.Service
-	healthSvc        *HealthService
+	cfgSvc                interfaces.NodeConfigService
+	server                *server.GrpcServer
+	taskSchedulerSvc      *scheduler.Service
+	taskHandlerSvc        *handler.Service
+	scheduleSvc           *schedule.Service
+	systemSvc             *system.Service
+	healthSvc             *HealthService
+	nodeMonitoringSvc     *NodeMonitoringService
+	taskReconciliationSvc *TaskReconciliationService
 
 	// settings
 	monitorInterval time.Duration
@@ -55,9 +57,9 @@ func (svc *MasterService) Start() {
 	// start health service
 	go svc.healthSvc.Start(func() bool {
 		// Master-specific health check: verify gRPC server and core services are running
-		return svc.server != nil && 
-			svc.taskSchedulerSvc != nil && 
-			svc.taskHandlerSvc != nil && 
+		return svc.server != nil &&
+			svc.taskSchedulerSvc != nil &&
+			svc.taskHandlerSvc != nil &&
 			svc.scheduleSvc != nil
 	})
 
@@ -165,15 +167,21 @@ func (svc *MasterService) Register() (err error) {
 
 func (svc *MasterService) monitor() (err error) {
 	// update master node status in db
-	if err := svc.updateMasterNodeStatus(); err != nil {
+	oldStatus, newStatus, err := svc.nodeMonitoringSvc.UpdateMasterNodeStatus()
+	if err != nil {
 		if errors.Is(err, mongo2.ErrNoDocuments) {
 			return nil
 		}
 		return err
 	}
 
+	// send notification if status changed
+	if utils.IsPro() && oldStatus != newStatus {
+		go svc.sendMasterStatusNotification(oldStatus, newStatus)
+	}
+
 	// all worker nodes
-	workerNodes, err := svc.getAllWorkerNodes()
+	workerNodes, err := svc.nodeMonitoringSvc.GetAllWorkerNodes()
 	if err != nil {
 		return err
 	}
@@ -199,55 +207,15 @@ func (svc *MasterService) monitor() (err error) {
 				return
 			}
 
+			// handle reconnection - reconcile disconnected tasks
+			go svc.taskReconciliationSvc.HandleNodeReconnection(n)
+
 			// update node available runners
-			_ = svc.updateNodeRunners(n)
+			_ = svc.nodeMonitoringSvc.UpdateNodeRunners(n)
 		}(&n)
 	}
 
 	wg.Wait()
-
-	return nil
-}
-
-func (svc *MasterService) getAllWorkerNodes() (nodes []models.Node, err error) {
-	query := bson.M{
-		"key":    bson.M{"$ne": svc.cfgSvc.GetNodeKey()}, // not self
-		"active": true,                                   // active
-	}
-	nodes, err = service.NewModelService[models.Node]().GetMany(query, nil)
-	if err != nil {
-		if errors.Is(err, mongo2.ErrNoDocuments) {
-			return nil, nil
-		}
-		svc.Errorf("get all worker nodes error: %v", err)
-		return nil, err
-	}
-	return nodes, nil
-}
-
-func (svc *MasterService) updateMasterNodeStatus() (err error) {
-	nodeKey := svc.cfgSvc.GetNodeKey()
-	node, err := service.NewModelService[models.Node]().GetOne(bson.M{"key": nodeKey}, nil)
-	if err != nil {
-		return err
-	}
-	oldStatus := node.Status
-
-	node.Status = constants.NodeStatusOnline
-	node.Active = true
-	node.ActiveAt = time.Now()
-	newStatus := node.Status
-
-	err = service.NewModelService[models.Node]().ReplaceById(node.Id, *node)
-	if err != nil {
-		return err
-	}
-
-	if utils.IsPro() {
-		if oldStatus != newStatus {
-			go svc.sendNotification(node)
-		}
-	}
 
 	return nil
 }
@@ -261,6 +229,10 @@ func (svc *MasterService) setWorkerNodeOffline(node *models.Node) {
 	if err != nil {
 		log.Errorf("failed to set worker node[%s] offline: %v", node.Key, err)
 	}
+
+	// Update running tasks on the offline node to abnormal status
+	svc.taskReconciliationSvc.HandleTasksForOfflineNode(node)
+
 	svc.sendNotification(node)
 }
 
@@ -285,25 +257,6 @@ func (svc *MasterService) pingNodeClient(n *models.Node) (ok bool) {
 	return true
 }
 
-func (svc *MasterService) updateNodeRunners(node *models.Node) (err error) {
-	query := bson.M{
-		"node_id": node.Id,
-		"status":  constants.TaskStatusRunning,
-	}
-	runningTasksCount, err := service.NewModelService[models.Task]().Count(query)
-	if err != nil {
-		svc.Errorf("failed to count running tasks for node[%s]: %v", node.Key, err)
-		return err
-	}
-	node.CurrentRunners = runningTasksCount
-	err = service.NewModelService[models.Node]().ReplaceById(node.Id, *node)
-	if err != nil {
-		svc.Errorf("failed to update node runners for node[%s]: %v", node.Key, err)
-		return err
-	}
-	return nil
-}
-
 func (svc *MasterService) sendNotification(node *models.Node) {
 	if !utils.IsPro() {
 		return
@@ -311,17 +264,35 @@ func (svc *MasterService) sendNotification(node *models.Node) {
 	go notification.GetNotificationService().SendNodeNotification(node)
 }
 
+func (svc *MasterService) sendMasterStatusNotification(oldStatus, newStatus string) {
+	if !utils.IsPro() {
+		return
+	}
+	nodeKey := svc.cfgSvc.GetNodeKey()
+	node, err := service.NewModelService[models.Node]().GetOne(bson.M{"key": nodeKey}, nil)
+	if err != nil {
+		svc.Errorf("failed to get master node for notification: %v", err)
+		return
+	}
+	go notification.GetNotificationService().SendNodeNotification(node)
+}
+
 func newMasterService() *MasterService {
+	cfgSvc := config.GetNodeConfigService()
+	server := server.GetGrpcServer()
+
 	return &MasterService{
-		cfgSvc:           config.GetNodeConfigService(),
-		monitorInterval:  15 * time.Second,
-		server:           server.GetGrpcServer(),
-		taskSchedulerSvc: scheduler.GetTaskSchedulerService(),
-		taskHandlerSvc:   handler.GetTaskHandlerService(),
-		scheduleSvc:      schedule.GetScheduleService(),
-		systemSvc:        system.GetSystemService(),
-		healthSvc:        GetHealthService(),
-		Logger:           utils.NewLogger("MasterService"),
+		cfgSvc:                cfgSvc,
+		monitorInterval:       15 * time.Second,
+		server:                server,
+		taskSchedulerSvc:      scheduler.GetTaskSchedulerService(),
+		taskHandlerSvc:        handler.GetTaskHandlerService(),
+		scheduleSvc:           schedule.GetScheduleService(),
+		systemSvc:             system.GetSystemService(),
+		healthSvc:             GetHealthService(),
+		nodeMonitoringSvc:     NewNodeMonitoringService(cfgSvc),
+		taskReconciliationSvc: NewTaskReconciliationService(server),
+		Logger:                utils.NewLogger("MasterService"),
 	}
 }
 

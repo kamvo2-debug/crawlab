@@ -7,6 +7,7 @@ import {
   TASK_STATUS_CANCELLED,
   TASK_STATUS_ERROR,
   TASK_STATUS_FINISHED,
+  TASK_STATUS_NODE_DISCONNECTED,
   TASK_STATUS_PENDING,
   TASK_STATUS_RUNNING,
 } from '@/constants/task';
@@ -116,6 +117,10 @@ export const getStatusOptions = (): SelectOption[] => {
     {
       label: t('components.task.status.label.abnormal'),
       value: TASK_STATUS_ABNORMAL,
+    },
+    {
+      label: t('components.task.status.label.nodeDisconnected'),
+      value: TASK_STATUS_NODE_DISCONNECTED,
     },
   ];
 };

@@ -6,6 +6,7 @@ import {
   TASK_STATUS_CANCELLED,
   TASK_STATUS_ERROR,
   TASK_STATUS_FINISHED,
+  TASK_STATUS_NODE_DISCONNECTED,
   TASK_STATUS_PENDING,
   TASK_STATUS_RUNNING,
 } from '@/constants/task';
@@ -80,6 +81,14 @@ const data = computed<TagProps>(() => {
         tooltip: t('components.task.status.tooltip.abnormal'),
         type: 'info',
         icon: ['fa', 'exclamation'],
+      };
+    case TASK_STATUS_NODE_DISCONNECTED:
+      return {
+        label: t('components.task.status.label.nodeDisconnected'),
+        tooltip: t('components.task.status.tooltip.nodeDisconnected'),
+        type: 'warning',
+        icon: ['fa', 'unlink'],
+        spinning: true,
       };
     default:
       return {

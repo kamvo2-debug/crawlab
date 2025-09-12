@@ -50,6 +50,7 @@ export declare global {
     | 'cancelled'
     | 'error'
     | 'finished'
+    | 'node_disconnected'
     | 'running'
     | 'assigned'
     | 'pending';

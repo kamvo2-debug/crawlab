@@ -38,6 +38,7 @@ interface LComponentsTask {
       error: string;
       cancelled: string;
       abnormal: string;
+      nodeDisconnected: string;
       unknown: string;
     };
     tooltip: {
@@ -48,6 +49,7 @@ interface LComponentsTask {
       error: string;
       cancelled: string;
       abnormal: string;
+      nodeDisconnected: string;
       unknown: string;
     };
   };
