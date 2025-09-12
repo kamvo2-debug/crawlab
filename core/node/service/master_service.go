@@ -8,6 +8,7 @@ import (
 	"github.com/apex/log"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/crawlab-team/crawlab/core/constants"
+	"github.com/crawlab-team/crawlab/core/grpc/client"
 	"github.com/crawlab-team/crawlab/core/grpc/server"
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"github.com/crawlab-team/crawlab/core/models/common"
@@ -108,11 +109,14 @@ func (svc *MasterService) startMonitoring() {
 	ticker := time.NewTicker(svc.monitorInterval)
 
 	for {
-		// monitor
+		// monitor worker nodes
 		err := svc.monitor()
 		if err != nil {
 			svc.Errorf("master[%s] monitor error: %v", svc.cfgSvc.GetNodeKey(), err)
 		}
+
+		// monitor gRPC client health on master
+		svc.monitorGrpcClientHealth()
 
 		// wait
 		<-ticker.C
@@ -207,6 +211,9 @@ func (svc *MasterService) monitor() (err error) {
 				return
 			}
 
+			// if both subscribe and ping succeed, ensure node is marked as online
+			go svc.setWorkerNodeOnline(n)
+
 			// handle reconnection - reconcile disconnected tasks
 			go svc.taskReconciliationSvc.HandleNodeReconnection(n)
 
@@ -234,6 +241,32 @@ func (svc *MasterService) setWorkerNodeOffline(node *models.Node) {
 	svc.taskReconciliationSvc.HandleTasksForOfflineNode(node)
 
 	svc.sendNotification(node)
+}
+
+func (svc *MasterService) setWorkerNodeOnline(node *models.Node) {
+	// Only update if the node is currently offline
+	if node.Status == constants.NodeStatusOnline {
+		return
+	}
+
+	oldStatus := node.Status
+	node.Status = constants.NodeStatusOnline
+	node.Active = true
+	node.ActiveAt = time.Now()
+	err := backoff.Retry(func() error {
+		return service.NewModelService[models.Node]().ReplaceById(node.Id, *node)
+	}, backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 3))
+	if err != nil {
+		svc.Errorf("failed to set worker node[%s] online: %v", node.Key, err)
+		return
+	}
+
+	svc.Infof("worker node[%s] status changed from '%s' to 'online'", node.Key, oldStatus)
+
+	// send notification if status changed
+	if utils.IsPro() && oldStatus != constants.NodeStatusOnline {
+		svc.sendNotification(node)
+	}
 }
 
 func (svc *MasterService) subscribeNode(n *models.Node) (ok bool) {
@@ -275,6 +308,18 @@ func (svc *MasterService) sendMasterStatusNotification(oldStatus, newStatus stri
 		return
 	}
 	go notification.GetNotificationService().SendNodeNotification(node)
+}
+
+func (svc *MasterService) monitorGrpcClientHealth() {
+	grpcClient := client.GetGrpcClient()
+
+	// Check if gRPC client is in a bad state
+	if !grpcClient.IsReady() && grpcClient.IsClosed() {
+		svc.Warnf("master node gRPC client is in SHUTDOWN state, forcing FULL RESET")
+		// Reset the gRPC client to get a fresh instance
+		client.ResetGrpcClient()
+		svc.Infof("master node gRPC client has been reset")
+	}
 }
 
 func newMasterService() *MasterService {

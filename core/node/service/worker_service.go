@@ -217,8 +217,8 @@ func (svc *WorkerService) subscribe() {
 	// Configure exponential backoff
 	b := backoff.NewExponentialBackOff()
 	b.InitialInterval = 1 * time.Second
-	b.MaxInterval = 1 * time.Minute
-	b.MaxElapsedTime = 10 * time.Minute
+	b.MaxInterval = 30 * time.Second   // Reduced from 1 minute
+	b.MaxElapsedTime = 0 * time.Minute // Never give up
 	b.Multiplier = 2.0
 
 	for {
@@ -232,7 +232,43 @@ func (svc *WorkerService) subscribe() {
 		// Use backoff for connection attempts
 		operation := func() error {
 			svc.Debugf("attempting to subscribe to master")
-			nodeClient, err := client.GetGrpcClient().GetNodeClient()
+
+			// Wait for gRPC client to be ready and registered after reconnection
+			grpcClient := client.GetGrpcClient()
+
+			waitStart := time.Now()
+			checkCount := 0
+			for !grpcClient.IsReadyAndRegistered() {
+				select {
+				case <-svc.ctx.Done():
+					return svc.ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+					checkCount++
+					// Log periodically while waiting
+					if checkCount%20 == 0 { // Every 10 seconds
+						svc.Warnf("still waiting for gRPC client (%.1fs)", time.Since(waitStart).Seconds())
+
+						// Force a reconnection attempt if we've been waiting too long
+						if time.Since(waitStart) > 15*time.Second {
+							svc.Warnf("forcing gRPC client reset due to prolonged wait")
+							grpcClient = client.ResetGrpcClient()
+							waitStart = time.Now()
+							checkCount = 0
+						}
+
+						// Check if client is in SHUTDOWN state and force restart
+						if !grpcClient.IsReady() && grpcClient.IsClosed() {
+							svc.Warnf("gRPC client is in SHUTDOWN state, forcing reset")
+							grpcClient = client.ResetGrpcClient()
+							waitStart = time.Now()
+							checkCount = 0
+						}
+					}
+				}
+			}
+			svc.Debugf("gRPC client is ready and registered after %.1fs", time.Since(waitStart).Seconds())
+
+			nodeClient, err := grpcClient.GetNodeClient()
 			if err != nil {
 				svc.Errorf("failed to get node client: %v", err)
 				return err
@@ -246,7 +282,7 @@ func (svc *WorkerService) subscribe() {
 				svc.Errorf("failed to subscribe to master: %v", err)
 				return err
 			}
-			svc.Debugf("subscribed to master")
+			svc.Infof("successfully subscribed to master")
 
 			// Handle messages
 			for {
@@ -284,17 +320,21 @@ func (svc *WorkerService) subscribe() {
 		if err != nil {
 			if svc.ctx.Err() != nil {
 				// Context was cancelled, exit gracefully
-				svc.Debugf("subscription retry cancelled due to context")
+				svc.Infof("subscription retry cancelled due to context")
 				return
 			}
-			svc.Errorf("subscription failed after max retries: %v", err)
+			svc.Errorf("subscription attempt failed: %v", err)
+			// Reset backoff for next attempt
+			b.Reset()
+		} else {
+			svc.Debugf("subscription completed successfully")
 		}
 
 		// Wait before attempting to reconnect, but respect context cancellation
 		select {
 		case <-svc.ctx.Done():
 			return
-		case <-time.After(time.Second):
+		case <-time.After(2 * time.Second):
 		}
 	}
 }

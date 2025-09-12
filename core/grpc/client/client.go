@@ -28,7 +28,8 @@ const (
 	registrationCheckInterval = 100 * time.Millisecond
 	idleGracePeriod           = 2 * time.Minute // Increased from 30 seconds
 	connectionTimeout         = 30 * time.Second
-	defaultClientTimeout      = 5 * time.Second
+	defaultClientTimeout      = 15 * time.Second // Increased from 5s for better reconnection handling
+	reconnectionClientTimeout = 60 * time.Second // Extended timeout during reconnection scenarios
 )
 
 // Circuit breaker states
@@ -257,7 +258,7 @@ func (c *GrpcClient) monitorState() {
 
 	var (
 		idleStartTime = time.Time{}
-		ticker        = time.NewTicker(stateMonitorInterval) // Reduce frequency
+		ticker        = time.NewTicker(stateMonitorInterval)
 	)
 	defer ticker.Stop()
 
@@ -310,9 +311,12 @@ func (c *GrpcClient) checkAndHandleStateChange(idleStartTime *time.Time) {
 
 	case connectivity.Shutdown:
 		c.setRegistered(false)
+		c.Warnf("connection state changed to SHUTDOWN - stopped flag: %v", c.stopped)
 		if !c.stopped {
 			c.Errorf("connection shutdown unexpectedly")
 			c.triggerReconnection(fmt.Sprintf("state change to %s", current))
+		} else {
+			c.Debugf("connection shutdown expected (client stopped)")
 		}
 
 	case connectivity.Idle:
@@ -418,35 +422,75 @@ func (c *GrpcClient) WaitForRegistered() {
 // These methods will wait for registration to complete or return an error if the client is stopped
 
 func (c *GrpcClient) GetNodeClient() (grpc2.NodeServiceClient, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultClientTimeout)
+	// Use longer timeout during reconnection scenarios
+	timeout := defaultClientTimeout
+	c.reconnectMux.Lock()
+	if c.reconnecting {
+		timeout = reconnectionClientTimeout
+	}
+	c.reconnectMux.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return c.GetNodeClientWithContext(ctx)
 }
 
 func (c *GrpcClient) GetTaskClient() (grpc2.TaskServiceClient, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultClientTimeout)
+	// Use longer timeout during reconnection scenarios
+	timeout := defaultClientTimeout
+	c.reconnectMux.Lock()
+	if c.reconnecting {
+		timeout = reconnectionClientTimeout
+	}
+	c.reconnectMux.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return c.GetTaskClientWithContext(ctx)
 }
 
 func (c *GrpcClient) GetModelBaseServiceClient() (grpc2.ModelBaseServiceClient, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultClientTimeout)
+	// Use longer timeout during reconnection scenarios
+	timeout := defaultClientTimeout
+	c.reconnectMux.Lock()
+	if c.reconnecting {
+		timeout = reconnectionClientTimeout
+	}
+	c.reconnectMux.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return c.GetModelBaseServiceClientWithContext(ctx)
 }
 
 func (c *GrpcClient) GetDependencyClient() (grpc2.DependencyServiceClient, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultClientTimeout)
+	// Use longer timeout during reconnection scenarios
+	timeout := defaultClientTimeout
+	c.reconnectMux.Lock()
+	if c.reconnecting {
+		timeout = reconnectionClientTimeout
+	}
+	c.reconnectMux.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return c.GetDependencyClientWithContext(ctx)
 }
 
 func (c *GrpcClient) GetMetricClient() (grpc2.MetricServiceClient, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultClientTimeout)
+	// Use longer timeout during reconnection scenarios
+	timeout := defaultClientTimeout
+	c.reconnectMux.Lock()
+	if c.reconnecting {
+		timeout = reconnectionClientTimeout
+	}
+	c.reconnectMux.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	return c.GetMetricClientWithContext(ctx)
@@ -586,6 +630,11 @@ func (c *GrpcClient) getClientWithContext(ctx context.Context, getter func() int
 		return getter(), nil
 	}
 
+	// Check if we're reconnecting to provide better error context
+	c.reconnectMux.Lock()
+	isReconnecting := c.reconnecting
+	c.reconnectMux.Unlock()
+
 	// Wait for registration with context
 	ticker := time.NewTicker(registrationCheckInterval)
 	defer ticker.Stop()
@@ -593,6 +642,9 @@ func (c *GrpcClient) getClientWithContext(ctx context.Context, getter func() int
 	for {
 		select {
 		case <-ctx.Done():
+			if isReconnecting {
+				return nil, fmt.Errorf("context cancelled while waiting for %s client registration during reconnection (this is normal during network restoration)", clientType)
+			}
 			return nil, fmt.Errorf("context cancelled while waiting for %s client registration", clientType)
 		case <-c.stop:
 			return nil, fmt.Errorf("client stopped while waiting for %s client registration", clientType)
@@ -881,11 +933,36 @@ func newGrpcClient() (c *GrpcClient) {
 
 var _client *GrpcClient
 var _clientOnce sync.Once
+var _clientMux sync.Mutex
 
 func GetGrpcClient() *GrpcClient {
 	_clientOnce.Do(func() {
 		_client = newGrpcClient()
 		go _client.Start()
 	})
+	return _client
+}
+
+// ResetGrpcClient creates a completely new gRPC client instance
+// This is needed when the client gets stuck and needs to be fully restarted
+func ResetGrpcClient() *GrpcClient {
+	_clientMux.Lock()
+	defer _clientMux.Unlock()
+
+	// Stop the old client if it exists
+	if _client != nil {
+		_client.Stop()
+	}
+
+	// Reset the sync.Once so we can create a new client
+	_clientOnce = sync.Once{}
+	_client = nil
+
+	// Create and start the new client
+	_clientOnce.Do(func() {
+		_client = newGrpcClient()
+		go _client.Start()
+	})
+
 	return _client
 }
