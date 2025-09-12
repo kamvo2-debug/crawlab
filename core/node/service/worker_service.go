@@ -26,7 +26,6 @@ type WorkerService struct {
 	healthSvc  *HealthService
 
 	// settings
-	address           interfaces.Address
 	heartbeatInterval time.Duration
 
 	// context and synchronization
@@ -38,7 +37,6 @@ type WorkerService struct {
 	// internals
 	stopped bool
 	n       *models.Node
-	s       grpc.NodeService_SubscribeClient
 	isReady bool
 	interfaces.Logger
 }
