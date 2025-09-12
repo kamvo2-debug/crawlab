@@ -276,7 +276,7 @@ func (svc *MasterService) pingNodeClient(n *models.Node) (ok bool) {
 		return false
 	}
 	err := stream.Send(&grpc.NodeServiceSubscribeResponse{
-		Code: grpc.NodeServiceSubscribeCode_PING,
+		Code: grpc.NodeServiceSubscribeCode_HEARTBEAT,
 	})
 	if err != nil {
 		svc.Errorf("failed to ping worker node client[%s]: %v", n.Key, err)

@@ -273,7 +273,7 @@ func (svc *WorkerService) subscribe() {
 				}
 
 				switch msg.Code {
-				case grpc.NodeServiceSubscribeCode_PING:
+				case grpc.NodeServiceSubscribeCode_HEARTBEAT:
 					// do nothing
 				}
 			}
