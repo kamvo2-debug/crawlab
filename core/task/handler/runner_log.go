@@ -54,6 +54,10 @@ func (r *Runner) writeLogLines(lines []string) {
 		case <-r.ctx.Done():
 			return
 		default:
+			// Only log the error if circuit breaker allows it to prevent flooding
+			if r.isLogCircuitClosed() {
+				r.Errorf("error sending log lines: %v", err)
+			}
 			// Record failure and open circuit breaker if needed
 			r.recordLogFailure()
 			// Mark connection as unhealthy for reconnection
@@ -180,7 +184,7 @@ func (r *Runner) recordLogFailure() {
 		r.logConnHealthy = false
 		r.logCircuitOpenTime = time.Now()
 		// Log this through standard logger only (not through writeLogLines to avoid recursion)
-		r.Logger.Warn(fmt.Sprintf("log circuit breaker opened after %d failures, suppressing log sends for %v", 
+		r.Logger.Warn(fmt.Sprintf("log circuit breaker opened after %d failures, suppressing log sends for %v",
 			r.logFailureCount, r.logCircuitOpenDuration))
 	}
 }
