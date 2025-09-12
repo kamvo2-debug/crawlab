@@ -33,12 +33,13 @@ const emit = defineEmits<{
   (e: 'tab-click', tab: FileNavItem): void;
   (e: 'save-file', item: FileNavItem): void;
   (e: 'drop-files', files: InputFile[]): void;
-  (
-    e: 'create-with-ai',
-    name: string,
-    sourceCode: string,
-    item?: FileNavItem
-  ): void;
+  // Temporarily commented out - AI features are WIP
+  // (
+  //   e: 'create-with-ai',
+  //   name: string,
+  //   sourceCode: string,
+  //   item?: FileNavItem
+  // ): void;
 }>();
 
 // i18n
@@ -327,13 +328,14 @@ const initEditor = async () => {
   updateEditorContent();
 };
 
-const onCreateWithAi = (
-  name: string,
-  sourceCode: string,
-  item?: FileNavItem
-) => {
-  emit('create-with-ai', name, sourceCode, item);
-};
+// Temporarily commented out - AI features are WIP
+// const onCreateWithAi = (
+//   name: string,
+//   sourceCode: string,
+//   item?: FileNavItem
+// ) => {
+//   emit('create-with-ai', name, sourceCode, item);
+// };
 
 onMounted(initEditor);
 
@@ -434,7 +436,8 @@ defineOptions({ name: 'ClFileEditor' });
   </div>
 
   <cl-file-editor-settings-dialog />
-  <cl-file-editor-create-with-ai-dialog @create="onCreateWithAi" />
+  <!-- Temporarily commented out - AI features are WIP -->
+  <!-- <cl-file-editor-create-with-ai-dialog @create="onCreateWithAi" /> -->
 </template>
 
 <style scoped>

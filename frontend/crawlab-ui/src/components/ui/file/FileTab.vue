@@ -191,21 +191,22 @@ const onDropFiles = async (files: InputFile[]) => {
   await listRootDir(activeId);
 };
 
-const onCreateWithAi = async (
-  name: string,
-  sourceCode: string,
-  item?: FileNavItem
-) => {
-  const { activeId } = props;
-  let path = `${pathSep}${name}`;
-  if (item) {
-    path = getPath(item, name);
-  }
-  await saveFile(activeId, path, sourceCode);
-  emit('file-change', path);
-  await listRootDir(activeId);
-  await openFile(path);
-};
+// Temporarily commented out - AI features are WIP
+// const onCreateWithAi = async (
+//   name: string,
+//   sourceCode: string,
+//   item?: FileNavItem
+// ) => {
+//   const { activeId } = props;
+//   let path = `${pathSep}${name}`;
+//   if (item) {
+//     path = getPath(item, name);
+//   }
+//   await saveFile(activeId, path, sourceCode);
+//   emit('file-change', path);
+//   await listRootDir(activeId);
+//   await openFile(path);
+// };
 
 const onTabClick = async (tab: FileNavItem) => {
   const { activeId } = props;
@@ -272,7 +273,6 @@ defineOptions({ name: 'ClFileTab' });
     @ctx-menu-create-spider="onContextMenuCreateSpider"
     @ctx-menu-delete-spider="onContextMenuDeleteSpider"
     @drop-files="onDropFiles"
-    @create-with-ai="onCreateWithAi"
     @tab-click="onTabClick"
   />
 </template>

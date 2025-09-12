@@ -19,7 +19,8 @@ import database from '@/router/database';
 import dependency from '@/router/dependency';
 import system from '@/router/system';
 import misc from '@/router/misc';
-import autoprobe from '@/router/autoprobe';
+// Temporarily commented out - AI features are WIP
+// import autoprobe from '@/router/autoprobe';
 import { initRouterAuth } from '@/router/hooks/auth';
 import { ROUTER_ROOT_NAME_ROOT } from '@/constants/router';
 import { ClNormalLayout } from '@/layouts';
@@ -50,7 +51,8 @@ export function getDefaultRoutes(): Array<ExtendedRouterRecord> {
         ...dependency,
         ...system,
         ...misc,
-        ...autoprobe,
+        // Temporarily commented out - AI features are WIP
+        // ...autoprobe,
       ],
     },
   ];
@@ -130,13 +132,14 @@ export function getDefaultSidebarMenuItems(): MenuItem[] {
         },
       ],
     },
-    {
-      path: '/autoprobes',
-      title: 'router.menuItems.autoprobe',
-      icon: getIconByRouteConcept('autoprobe'),
-      badge: 'common.mode.preview',
-      badgeType: 'primary',
-    },
+    // Temporarily hidden - AI features are WIP
+    // {
+    //   path: '/autoprobes',
+    //   title: 'router.menuItems.autoprobe',
+    //   icon: getIconByRouteConcept('autoprobe'),
+    //   badge: 'common.mode.preview',
+    //   badgeType: 'primary',
+    // },
     {
       path: '/users',
       title: 'router.menuItems.users',
