@@ -31,7 +31,8 @@ services:
       CRAWLAB_NODE_MASTER: "N"
       CRAWLAB_MASTER_HOST: "master"
     depends_on:
-      - master
+      master:
+        condition: service_healthy
     env_file:
       - .env
 
@@ -44,7 +45,8 @@ services:
       CRAWLAB_NODE_MASTER: "N"
       CRAWLAB_MASTER_HOST: "master"
     depends_on:
-      - master
+      master:
+        condition: service_healthy
     env_file:
       - .env
 
