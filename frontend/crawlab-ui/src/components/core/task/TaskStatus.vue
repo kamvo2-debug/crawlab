@@ -86,9 +86,9 @@ const data = computed<TagProps>(() => {
       return {
         label: t('components.task.status.label.nodeDisconnected'),
         tooltip: t('components.task.status.tooltip.nodeDisconnected'),
-        type: 'warning',
-        icon: ['fa', 'unlink'],
-        spinning: true,
+        type: 'info',
+        icon: ['fa', 'plug-circle-xmark'],
+        spinning: false,
       };
     default:
       return {
