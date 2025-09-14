@@ -6,6 +6,12 @@ on:
   release:
     types: [ published ]
   workflow_dispatch:
+    inputs:
+      multiarch:
+        description: 'Build multi-architecture images (slower)'
+        required: false
+        default: false
+        type: boolean
   repository_dispatch:
     types: [ docker-crawlab ]
 
@@ -34,6 +40,8 @@ jobs:
       workflow_changed: ${{ steps.check_changed_files.outputs.workflow_changed }}
       base_image_changed: ${{ steps.check_changed_files.outputs.base_image_changed }}
       version: ${{ steps.version.outputs.version }}
+      platforms: ${{ steps.platform_config.outputs.platforms }}
+      is_multiarch_build: ${{ steps.platform_config.outputs.is_multiarch_build }}
 
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +66,7 @@ jobs:
               - 'docker/nginx/**'
             workflow:
               - '.github/workflows/docker-crawlab.yml'
-            base_image:
+            baseimage:
               - 'docker/base-image/**'
 
       - id: check_changed_files
@@ -76,7 +84,7 @@ jobs:
             echo "frontend_changed=${{ steps.changed_files.outputs.frontend_any_changed }}" >> $GITHUB_OUTPUT
             echo "docker_changed=${{ steps.changed_files.outputs.docker_any_changed }}" >> $GITHUB_OUTPUT
             echo "workflow_changed=${{ steps.changed_files.outputs.workflow_any_changed }}" >> $GITHUB_OUTPUT
-            echo "base_image_changed=${{ steps.changed_files.outputs.base_image_any_changed }}" >> $GITHUB_OUTPUT
+            echo "base_image_changed=${{ steps.changed_files.outputs.baseimage_any_changed }}" >> $GITHUB_OUTPUT
           fi
           
           # Display change status for each component
@@ -84,7 +92,7 @@ jobs:
           echo "Frontend changed: ${{ steps.changed_files.outputs.frontend_any_changed }}"
           echo "Docker changed: ${{ steps.changed_files.outputs.docker_any_changed }}"
           echo "Workflow changed: ${{ steps.changed_files.outputs.workflow_any_changed }}"
-          echo "Base image changed: ${{ steps.changed_files.outputs.base_image_any_changed }}"
+          echo "Base image changed: ${{ steps.changed_files.outputs.baseimage_any_changed }}"
 
       - id: version
         name: Get version
@@ -100,6 +108,22 @@ jobs:
           
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      - id: platform_config
+        name: Configure build platforms
+        run: |
+          # Default to x64-only builds for speed (majority of users)
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.multiarch }}" == "true" ]]; then
+            # Multi-arch only when explicitly requested
+            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+            echo "is_multiarch_build=true" >> $GITHUB_OUTPUT
+            echo "🏗️ Building multi-architecture images (amd64 + arm64) - explicitly requested"
+          else
+            # x64-only by default (faster, serves majority of users)
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT  
+            echo "is_multiarch_build=false" >> $GITHUB_OUTPUT
+            echo "⚡ Building x64-only images (default - faster builds for majority users)"
+          fi
+
   build_base_image:
     name: Build base image
     needs: [ setup ]
@@ -109,6 +133,10 @@ jobs:
       failed: ${{ steps.set_output.outputs.failed }}
     steps:
       - uses: actions/checkout@v4
+      - name: Show build configuration
+        run: |
+          echo "🏗️ Build Strategy: ${{ needs.setup.outputs.is_multiarch_build == 'true' && 'Multi-Architecture (amd64 + arm64)' || 'x64-Only (faster development)' }}"
+          echo "📦 Platforms: ${{ needs.setup.outputs.platforms }}"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
@@ -121,7 +149,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./docker/base-image
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ needs.setup.outputs.platforms }}
           push: true
           tags: ${{ env.IMAGE_NAME_CRAWLAB_BASE }}:${{ needs.setup.outputs.version }}
       - name: Set output
@@ -176,6 +204,8 @@ jobs:
       failed: ${{ steps.set_output.outputs.failed }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -187,7 +217,7 @@ jobs:
         with:
           context: .
           file: ${{ env.IMAGE_PATH_CRAWLAB_BACKEND }}/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ needs.setup.outputs.platforms }}
           push: true
           tags: ${{ env.IMAGE_NAME_CRAWLAB_BACKEND }}:${{ needs.setup.outputs.version }}
       - name: Set output
@@ -206,6 +236,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -216,7 +248,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ${{ env.IMAGE_PATH_CRAWLAB_FRONTEND }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ needs.setup.outputs.platforms }}
           push: true
           tags: ${{ env.IMAGE_NAME_CRAWLAB_FRONTEND }}:${{ needs.setup.outputs.version }}
       - name: Set output
@@ -271,7 +303,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ needs.setup.outputs.platforms }}
           build-args: |
             CRAWLAB_TAG=${{ needs.setup.outputs.version }}
           push: true
