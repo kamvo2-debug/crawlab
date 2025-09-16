@@ -56,7 +56,7 @@ func (svc *Service) Send(s *models.NotificationSetting, args ...any) {
 			case TypeMail:
 				svc.SendMail(s, ch, title, content)
 			case TypeIM:
-				svc.SendIM(ch, title, content)
+				svc.SendIM(s, ch, title, content)
 			}
 		}(chId)
 	}
@@ -81,9 +81,9 @@ func (svc *Service) SendMail(s *models.NotificationSetting, ch *models.Notificat
 	svc.saveRequest(r, err)
 }
 
-func (svc *Service) SendIM(ch *models.NotificationChannel, title, content string) {
+func (svc *Service) SendIM(s *models.NotificationSetting, ch *models.NotificationChannel, title, content string) {
 	// request
-	r, _ := svc.createRequestIM(ch, title, content, false)
+	r, _ := svc.createRequestIM(s, ch, title, content, false)
 
 	// send mobile notification
 	err := SendIMNotification(ch, title, content)
@@ -119,7 +119,7 @@ func (svc *Service) SendTestMessage(locale string, ch *models.NotificationChanne
 		}
 
 		// Create request
-		r, _ = svc.createRequestMailTest(ch, title, content, toMail)
+		r, _ = svc.createRequestMailTest(nil, ch, title, content, toMail)
 
 		// For email
 		err = SendMail(nil, ch, toMail, nil, nil, title, content)
@@ -129,7 +129,7 @@ func (svc *Service) SendTestMessage(locale string, ch *models.NotificationChanne
 
 	case TypeIM:
 		// Create request
-		r, _ = svc.createRequestIM(ch, title, content, true)
+		r, _ = svc.createRequestIM(nil, ch, title, content, true)
 
 		// For instant messaging
 		err = SendIMNotification(ch, title, content)
@@ -580,7 +580,7 @@ func (svc *Service) createRequestMail(s *models.NotificationSetting, ch *models.
 	return &r, nil
 }
 
-func (svc *Service) createRequestMailTest(ch *models.NotificationChannel, title, content string, mailTo []string) (res *models.NotificationRequest, err error) {
+func (svc *Service) createRequestMailTest(s *models.NotificationSetting, ch *models.NotificationChannel, title, content string, mailTo []string) (res *models.NotificationRequest, err error) {
 	if mailTo == nil {
 		mailTo = []string{ch.SMTPUsername}
 	}
@@ -596,6 +596,11 @@ func (svc *Service) createRequestMailTest(ch *models.NotificationChannel, title,
 		Test:        true,
 	}
 
+	// Set SettingId if setting is provided (for non-test requests)
+	if s != nil {
+		r.SettingId = s.Id
+	}
+
 	r.SetCreatedAt(time.Now())
 	r.SetUpdatedAt(time.Now())
 	r.Id, err = service.NewModelService[models.NotificationRequest]().InsertOne(r)
@@ -606,7 +611,7 @@ func (svc *Service) createRequestMailTest(ch *models.NotificationChannel, title,
 	return &r, nil
 }
 
-func (svc *Service) createRequestIM(ch *models.NotificationChannel, title, content string, test bool) (res *models.NotificationRequest, err error) {
+func (svc *Service) createRequestIM(s *models.NotificationSetting, ch *models.NotificationChannel, title, content string, test bool) (res *models.NotificationRequest, err error) {
 	r := models.NotificationRequest{
 		Status:    StatusSending,
 		ChannelId: ch.Id,
@@ -614,6 +619,12 @@ func (svc *Service) createRequestIM(ch *models.NotificationChannel, title, conte
 		Content:   content,
 		Test:      test,
 	}
+
+	// Set SettingId if setting is provided (for non-test requests)
+	if s != nil {
+		r.SettingId = s.Id
+	}
+
 	r.SetCreatedAt(time.Now())
 	r.SetUpdatedAt(time.Now())
 	r.Id, err = service.NewModelService[models.NotificationRequest]().InsertOne(r)

@@ -24,6 +24,6 @@ type NotificationRequest struct {
 type NotificationRequestDTO struct {
 	NotificationRequest `json:",inline" bson:",inline"`
 
-	Setting *NotificationSetting `json:"setting,omitempty" bson:"-"`
-	Channel *NotificationChannel `json:"channel,omitempty" bson:"-"`
+	Setting *NotificationSetting `json:"setting,omitempty" bson:"_setting,omitempty"`
+	Channel *NotificationChannel `json:"channel,omitempty" bson:"_channel,omitempty"`
 }
