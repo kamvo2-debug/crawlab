@@ -17,6 +17,7 @@ const database: LComponentsDatabase = {
     password: '密码',
     changePassword: '更改密码',
     database: '数据库名称',
+    useOrm: '使用 ORM',
     ormMode: '数据库引擎',
     ormModeTooltip: '使用现代 ORM 获得更好的类型安全和性能',
     mongo: {
@@ -171,7 +172,7 @@ const database: LComponentsDatabase = {
     migrationTitle: '安全迁移',
     migrationMessage: '您可以随时在 ORM 和传统模式之间切换，不会丢失数据。ORM 提供更好的性能和安全性。',
     notSupportedTitle: 'ORM 不可用',
-    notSupportedMessage: '此数据库类型不支持 ORM。支持的类型：MySQL、PostgreSQL、SQL Server。',
+    notSupportedMessage: 'ORM（对象关系映射）系统仅适用于关系型数据库。此数据库类型使用传统数据库服务。',
   },
 };
 

@@ -18,6 +18,7 @@ export declare global {
       username: string;
       password: string;
       changePassword: string;
+      useOrm: string;
       ormMode: string;
       ormModeTooltip: string;
       mongo: {

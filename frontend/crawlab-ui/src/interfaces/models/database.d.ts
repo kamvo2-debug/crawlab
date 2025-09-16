@@ -155,9 +155,9 @@ export declare global {
 
   interface DatabaseOrmCompatibility {
     supported: boolean;
-    dataSource: string;
-    shouldShowToggle: boolean;
-    supportedSources: string[];
+    data_source: string;
+    should_show_toggle: boolean;
+    supported_sources: string[];
   }
 
   interface DatabaseOrmStatus {

@@ -10,6 +10,7 @@ interface Props {
   modelValue?: boolean;
   disabled?: boolean;
   showTooltip?: boolean;
+  showLabel?: boolean;
 }
 
 interface Emits {
@@ -20,6 +21,7 @@ const props = withDefaults(defineProps<Props>(), {
   modelValue: false,
   disabled: false,
   showTooltip: true,
+  showLabel: true,
 });
 
 const emit = defineEmits<Emits>();
@@ -46,7 +48,7 @@ defineOptions({ name: 'ClDatabaseOrmToggle' });
 <template>
   <div v-if="shouldShow" class="database-orm-toggle">
     <div class="toggle-container">
-      <div class="label-container">
+      <div v-if="showLabel" class="label-container">
         <span class="form-label">{{ t('components.database.form.ormMode') }}</span>
         <el-tooltip
           v-if="showTooltip"

@@ -6,7 +6,6 @@ import useDatabaseDetail from '@/views/database/detail/useDatabaseDetail';
 import { translate } from '@/utils';
 import { getDatabaseDefaultByDataSource } from '@/utils/database';
 import { useDatabaseOrmService } from '@/services/database/databaseService';
-import ClDatabaseOrmToggle from './DatabaseOrmToggle.vue';
 
 defineProps<{
   readonly?: boolean;
@@ -115,10 +114,13 @@ defineOptions({ name: 'ClDatabaseForm' });
     <!--./Row-->
 
     <!--Row: ORM Toggle-->
-    <cl-form-item :span="4" prop="use_orm">
-      <cl-database-orm-toggle
+    <cl-form-item 
+      :span="4" 
+      :label="t('components.database.form.useOrm')"
+      prop="use_orm"
+    >
+      <cl-switch
         v-model="form.use_orm"
-        :data-source="form.data_source"
         :disabled="isDisabled"
       />
     </cl-form-item>

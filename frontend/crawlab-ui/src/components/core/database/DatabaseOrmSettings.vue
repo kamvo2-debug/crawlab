@@ -16,11 +16,11 @@ const store = getStore();
 const { activeId } = useDatabaseDetail();
 
 // ORM service
-const { 
-  getOrmCompatibility, 
-  getOrmStatus, 
-  setOrmStatus, 
-  isOrmSupported 
+const {
+  getOrmCompatibility,
+  getOrmStatus,
+  setOrmStatus,
+  isOrmSupported
 } = useDatabaseOrmService();
 
 // reactive state
@@ -32,7 +32,7 @@ const database = computed(() => store.getters['database/form']);
 // methods
 const loadOrmInfo = async () => {
   if (!activeId.value) return;
-  
+
   loading.value = true;
   try {
     const [compatibilityRes, statusRes] = await Promise.all([
@@ -41,6 +41,15 @@ const loadOrmInfo = async () => {
     ]);
     compatibility.value = compatibilityRes;
     ormStatus.value = statusRes;
+
+    // Debug logging to understand the issue
+    console.log('Database ORM Compatibility Debug:', {
+      databaseId: activeId.value,
+      compatibility: compatibilityRes,
+      status: statusRes,
+      database: database.value,
+      dataSource: database.value?.data_source
+    });
   } catch (error) {
     console.error('Failed to load ORM info:', error);
   } finally {
@@ -50,24 +59,24 @@ const loadOrmInfo = async () => {
 
 const handleToggleOrm = async () => {
   if (!activeId.value || !ormStatus.value) return;
-  
+
   loading.value = true;
   try {
     const newValue = !ormStatus.value.enabled;
     await setOrmStatus(activeId.value, newValue);
-    
+
     // Update local state
     ormStatus.value.enabled = newValue;
-    
+
     // Update form in store
     store.commit('database/setForm', {
       ...database.value,
       use_orm: newValue,
     });
-    
+
     // Show success message
     // You might want to add a success notification here
-    
+
   } catch (error) {
     console.error('Failed to toggle ORM:', error);
     // You might want to add an error notification here
@@ -93,8 +102,8 @@ defineOptions({ name: 'ClDatabaseOrmSettings' });
           <span>{{ t('components.database.form.ormMode') }}</span>
         </div>
       </template>
-      
-      <div v-if="compatibility?.shouldShowToggle" class="orm-settings-content">
+
+      <div v-if="compatibility?.should_show_toggle" class="orm-settings-content">
         <div class="orm-status-section">
           <div class="status-row">
             <span class="label">{{ t('components.database.form.status') }}:</span>
@@ -106,12 +115,12 @@ defineOptions({ name: 'ClDatabaseOrmSettings' });
             />
             <cl-tag
               v-else
-              type="warning"  
+              type="warning"
               :label="t('components.database.orm.disabled')"
               :icon="['fa', 'wrench']"
             />
           </div>
-          
+
           <div class="action-row">
             <el-button
               :type="ormStatus?.enabled ? 'warning' : 'success'"
@@ -119,9 +128,9 @@ defineOptions({ name: 'ClDatabaseOrmSettings' });
               @click="handleToggleOrm"
               :loading="loading"
             >
-              {{ ormStatus?.enabled 
-                  ? t('components.database.orm.switchToLegacy') 
-                  : t('components.database.orm.switchToOrm') 
+              {{ ormStatus?.enabled
+                  ? t('components.database.orm.switchToLegacy')
+                  : t('components.database.orm.switchToOrm')
               }}
             </el-button>
           </div>
@@ -175,6 +184,10 @@ defineOptions({ name: 'ClDatabaseOrmSettings' });
           <p>
             {{ t('components.database.orm.notSupportedMessage') }}
           </p>
+          <div v-if="database?.data_source" class="debug-info">
+            <p><strong>Current database type:</strong> {{ database.data_source }}</p>
+            <p><strong>Supported types:</strong> MySQL, PostgreSQL, SQL Server</p>
+          </div>
         </el-alert>
       </div>
     </el-card>
@@ -214,12 +227,12 @@ defineOptions({ name: 'ClDatabaseOrmSettings' });
 
 .label {
   font-weight: 500;
-  color: var(--cl-text-color-primary);
+  color: var(--el-text-color-primary);
 }
 
 .orm-benefits h4 {
   margin: 0 0 12px 0;
-  color: var(--cl-text-color-primary);
+  color: var(--el-text-color-primary);
   font-size: 14px;
 }
 
@@ -237,7 +250,7 @@ defineOptions({ name: 'ClDatabaseOrmSettings' });
   align-items: center;
   gap: 8px;
   font-size: 14px;
-  color: var(--cl-text-color-regular);
+  color: var(--el-text-color-regular);
 }
 
 .benefit-icon.success {
@@ -247,5 +260,17 @@ defineOptions({ name: 'ClDatabaseOrmSettings' });
 .migration-info,
 .orm-not-supported {
   margin-top: 16px;
+}
+
+.debug-info {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
+.debug-info p {
+  margin: 4px 0;
 }
 </style>

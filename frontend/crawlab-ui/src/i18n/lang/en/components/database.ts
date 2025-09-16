@@ -17,6 +17,7 @@ const database: LComponentsDatabase = {
     address: 'Address',
     changePassword: 'Change Password',
     database: 'Database Name',
+    useOrm: 'Use ORM',
     ormMode: 'Database Engine',
     ormModeTooltip: 'Use modern ORM for better type safety and performance',
     mongo: {
@@ -173,7 +174,7 @@ const database: LComponentsDatabase = {
     migrationTitle: 'Safe Migration',
     migrationMessage: 'You can switch between ORM and Legacy modes anytime without data loss. ORM provides better performance and safety.',
     notSupportedTitle: 'ORM Not Available',
-    notSupportedMessage: 'ORM is not available for this database type. Supported types: MySQL, PostgreSQL, SQL Server.',
+    notSupportedMessage: 'The ORM (Object-Relational Mapping) system is only available for relational databases. This database type uses the traditional database service instead.',
   },
 };
 
