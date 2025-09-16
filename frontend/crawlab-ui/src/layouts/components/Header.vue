@@ -154,6 +154,8 @@ defineOptions({ name: 'ClHeader' });
             </template>
           </el-dropdown>
         </div>
+        <!-- AI Assistant toggle button hidden -->
+        <!--
         <div class="item action" @click="toggleChatbotSidebar">
           <el-tooltip :content="t('components.ai.chatbot.button')">
             <div class="chat-toggle">
@@ -161,6 +163,7 @@ defineOptions({ name: 'ClHeader' });
             </div>
           </el-tooltip>
         </div>
+        -->
         <div v-if="me" class="item action">
           <el-dropdown trigger="click" popper-class="me-dropdown">
             <div class="me">
