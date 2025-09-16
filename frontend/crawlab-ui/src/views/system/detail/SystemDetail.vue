@@ -37,11 +37,11 @@ const menuItems = computed<NavItem[]>(() => [
     icon: getIconByGeneralConcept('customize'),
     label: t('views.system.menuItems.customize'),
   },
-  {
-    id: 'models',
-    icon: getIconByRouteConcept('models'),
-    label: t('views.system.menuItems.models'),
-  },
+  // {
+  //   id: 'models',
+  //   icon: getIconByRouteConcept('models'),
+  //   label: t('views.system.menuItems.models'),
+  // },
   {
     id: 'dependency',
     icon: getIconByRouteConcept('dependency'),
