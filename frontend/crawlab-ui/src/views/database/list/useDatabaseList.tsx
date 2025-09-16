@@ -6,8 +6,9 @@ import {
   ClDatabaseStatus,
   useDatabase,
   ClIcon,
+  ClTag,
 } from '@/components';
-import useDataSourceService from '@/services/database/databaseService';
+import useDataSourceService, { useDatabaseOrmService } from '@/services/database/databaseService';
 import {
   DATABASE_STATUS_OFFLINE,
   DATABASE_STATUS_ONLINE,
@@ -47,6 +48,7 @@ const useDatabaseList = () => {
   const { commit } = store;
 
   const { dataSourceOptions } = useDatabase(store);
+  const { isOrmSupported } = useDatabaseOrmService();
 
   // services
   const { getList, deleteById } = useDataSourceService(store);
@@ -165,6 +167,38 @@ const useDatabaseList = () => {
           ),
         },
         {
+          key: 'orm_status',
+          label: t('components.database.form.ormMode'),
+          icon: ['fa', 'bolt'],
+          width: '120',
+          value: (row: Database) => {
+            if (!isOrmSupported(row.data_source)) {
+              return (
+                <ClTag
+                  type="info"
+                  label={t('components.database.orm.legacy')}
+                  size="small"
+                />
+              );
+            }
+            return row.use_orm ? (
+              <ClTag
+                type="success"
+                label={t('components.database.orm.enabled')}
+                icon={['fa', 'bolt']}
+                size="small"
+              />
+            ) : (
+              <ClTag
+                type="warning"
+                label={t('components.database.orm.disabled')}
+                icon={['fa', 'wrench']}
+                size="small"
+              />
+            );
+          },
+        },
+        {
           key: 'status', // status
           label: t('components.database.form.status'),
           icon: ['fa', 'heartbeat'],
@@ -253,7 +287,7 @@ const useDatabaseList = () => {
     tableColumns,
   } as UseListOptions<Database>;
 
-  setupListComponent(ns, store, [], true);
+  setupListComponent(ns, store);
 
   const selectableFunction: TableSelectableFunction<Database> = (
     row: Database

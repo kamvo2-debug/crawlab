@@ -69,6 +69,8 @@ import DatabaseDatabaseDetail from './core/database/DatabaseDatabaseDetail.vue';
 import DatabaseDataSource from './core/database/DatabaseDataSource.vue';
 import DatabaseForm from './core/database/DatabaseForm.vue';
 import DatabaseNavTabs from './core/database/nav/DatabaseNavTabs.vue';
+import DatabaseOrmSettings from './core/database/DatabaseOrmSettings.vue';
+import DatabaseOrmToggle from './core/database/DatabaseOrmToggle.vue';
 import DatabaseSidebar from './core/database/DatabaseSidebar.vue';
 import DatabaseStatus from './core/database/DatabaseStatus.vue';
 import DatabaseTableDetail from './core/database/DatabaseTableDetail.vue';
@@ -325,6 +327,8 @@ export {
   DatabaseDataSource as ClDatabaseDataSource,
   DatabaseForm as ClDatabaseForm,
   DatabaseNavTabs as ClDatabaseNavTabs,
+  DatabaseOrmSettings as ClDatabaseOrmSettings,
+  DatabaseOrmToggle as ClDatabaseOrmToggle,
   DatabaseSidebar as ClDatabaseSidebar,
   DatabaseStatus as ClDatabaseStatus,
   DatabaseTableDetail as ClDatabaseTableDetail,

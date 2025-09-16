@@ -18,6 +18,8 @@ export declare global {
       username: string;
       password: string;
       changePassword: string;
+      ormMode: string;
+      ormModeTooltip: string;
       mongo: {
         authSource: string;
         authMechanism: string;
@@ -152,6 +154,25 @@ export declare global {
       commitChanges: string;
       rollbackChanges: string;
       runQuery: string;
+    };
+    orm: {
+      enabled: string;
+      disabled: string;
+      modern: string;
+      legacy: string;
+      helpTextEnabled: string;
+      helpTextDisabled: string;
+      switchToOrm: string;
+      switchToLegacy: string;
+      benefitsTitle: string;
+      benefit1: string;
+      benefit2: string;
+      benefit3: string;
+      benefit4: string;
+      migrationTitle: string;
+      migrationMessage: string;
+      notSupportedTitle: string;
+      notSupportedMessage: string;
     };
   }
 }

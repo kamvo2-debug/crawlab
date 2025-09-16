@@ -26,6 +26,7 @@ const state = {
   newFormFn: () => {
     return {
       hosts: [],
+      use_orm: false, // Default will be set based on data source
     };
   },
   tabs: [

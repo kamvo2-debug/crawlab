@@ -18,6 +18,7 @@ export declare global {
     password?: string;
     database?: string;
     is_default?: boolean;
+    use_orm?: boolean;
   }
 
   type DatabaseDataSource =
@@ -150,5 +151,17 @@ export declare global {
     cache_hit_ratio?: number;
     replication_lag?: number;
     lock_wait_time?: number;
+  }
+
+  interface DatabaseOrmCompatibility {
+    supported: boolean;
+    dataSource: string;
+    shouldShowToggle: boolean;
+    supportedSources: string[];
+  }
+
+  interface DatabaseOrmStatus {
+    enabled: boolean;
+    supported: boolean;
   }
 }

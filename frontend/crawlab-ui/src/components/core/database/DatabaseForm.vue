@@ -5,6 +5,8 @@ import useDatabase from '@/components/core/database/useDatabase';
 import useDatabaseDetail from '@/views/database/detail/useDatabaseDetail';
 import { translate } from '@/utils';
 import { getDatabaseDefaultByDataSource } from '@/utils/database';
+import { useDatabaseOrmService } from '@/services/database/databaseService';
+import ClDatabaseOrmToggle from './DatabaseOrmToggle.vue';
 
 defineProps<{
   readonly?: boolean;
@@ -23,6 +25,8 @@ const { formRef, isSelectiveForm, onChangePasswordFunc, dataSourceOptions } =
 
 const { activeId } = useDatabaseDetail();
 
+const { isOrmSupported } = useDatabaseOrmService();
+
 computed<boolean>(() => !!activeId.value);
 
 const form = computed(() => state.form);
@@ -31,11 +35,14 @@ const isDisabled = computed(() => form.value.is_default);
 
 const onDataSourceChange = (dataSource: DatabaseDataSource) => {
   const { name, host, port } = getDatabaseDefaultByDataSource(dataSource) || {};
+  const useOrm = isOrmSupported(dataSource); // Set ORM default based on support
+  
   store.commit(`${ns}/setForm`, {
     data_source: dataSource,
     name,
     host,
     port,
+    use_orm: useOrm,
   });
 };
 
@@ -104,6 +111,16 @@ defineOptions({ name: 'ClDatabaseForm' });
           </template>
         </el-option>
       </el-select>
+    </cl-form-item>
+    <!--./Row-->
+
+    <!--Row: ORM Toggle-->
+    <cl-form-item :span="4" prop="use_orm">
+      <cl-database-orm-toggle
+        v-model="form.use_orm"
+        :data-source="form.data_source"
+        :disabled="isDisabled"
+      />
     </cl-form-item>
     <!--./Row-->
 
