@@ -22,7 +22,7 @@ type Database struct {
 	Active            bool      `json:"active" bson:"active" description:"Active"`
 	ActiveAt          time.Time `json:"active_ts" bson:"active_ts" description:"Active at"`
 	IsDefault         bool      `json:"is_default" bson:"-" binding:"-"`
-	UseORM            bool      `json:"use_orm" bson:"use_orm" description:"Use ORM instead of legacy database service"`
+	UseORM            bool      `json:"use_orm" bson:"use_orm" description:"Use ORM instead of legacy database service (only for MySQL, PostgreSQL, SQL Server)"`
 
 	MongoParams *struct {
 		AuthSource    string `json:"auth_source,omitempty" bson:"auth_source,omitempty" description:"Auth source"`
