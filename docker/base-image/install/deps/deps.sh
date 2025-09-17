@@ -22,7 +22,12 @@ apt-get install -y \
     net-tools \
     fonts-wqy-zenhei \
     fonts-noto-cjk \
-    fontconfig
+    fontconfig \
+    locales
+
+# Generate Chinese locale
+locale-gen zh_CN.UTF-8
+update-locale
 
 # Add source /etc/profile to ~/.bashrc
 echo "source /etc/profile" >> ~/.bashrc
