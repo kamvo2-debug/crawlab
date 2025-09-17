@@ -79,6 +79,12 @@ func newTaskRunner(id primitive.ObjectID, svc *Service) (r *Runner, err error) {
 	r.ctx, r.cancel = context.WithCancel(svc.ctx)
 	r.done = make(chan struct{})
 
+	// Initialize status cache for disconnection resilience
+	if err := r.initStatusCache(); err != nil {
+		r.Errorf("error initializing status cache: %v", err)
+		errs.Errors = append(errs.Errors, err)
+	}
+
 	// initialize task runner
 	if err := r.Init(); err != nil {
 		r.Errorf("error initializing task runner: %v", err)
@@ -138,16 +144,21 @@ type Runner struct {
 
 	// circuit breaker for log connections to prevent cascading failures
 	logConnHealthy         bool          // tracks if log connection is healthy
-	logConnMutex          sync.RWMutex  // mutex for log connection health state
-	lastLogSendFailure    time.Time     // last time log send failed
-	logCircuitOpenTime    time.Time     // when circuit breaker was opened
-	logFailureCount       int           // consecutive log send failures
+	logConnMutex           sync.RWMutex  // mutex for log connection health state
+	lastLogSendFailure     time.Time     // last time log send failed
+	logCircuitOpenTime     time.Time     // when circuit breaker was opened
+	logFailureCount        int           // consecutive log send failures
 	logCircuitOpenDuration time.Duration // how long to keep circuit open after failures
 
 	// configurable timeouts for robust task execution
 	ipcTimeout          time.Duration // timeout for IPC operations
 	healthCheckInterval time.Duration // interval for health checks
 	connHealthInterval  time.Duration // interval for connection health checks
+
+	// status cache for disconnection resilience
+	statusCache      *TaskStatusCache     // local status cache that survives disconnections
+	pendingUpdates   []TaskStatusSnapshot // status updates to sync when reconnected
+	statusCacheMutex sync.RWMutex         // mutex for status cache operations
 }
 
 // Init initializes the task runner by updating the task status and establishing gRPC connections
@@ -268,6 +279,9 @@ func (r *Runner) Run() (err error) {
 		if r.ipcChan != nil {
 			close(r.ipcChan)
 		}
+
+		// 6. Clean up status cache for completed tasks
+		r.cleanupStatusCache()
 	}()
 
 	// wait for process to finish
@@ -499,6 +513,9 @@ func (r *Runner) updateTask(status string, e error) (err error) {
 	}
 
 	if r.t != nil && status != "" {
+		// Cache status locally first (always succeeds)
+		r.cacheTaskStatus(status, e)
+
 		// update task status
 		r.t.Status = status
 		if e != nil {
@@ -507,18 +524,22 @@ func (r *Runner) updateTask(status string, e error) (err error) {
 		if utils.IsMaster() {
 			err = service.NewModelService[models.Task]().ReplaceById(r.t.Id, *r.t)
 			if err != nil {
-				return err
+				r.Warnf("failed to update task in database, but cached locally: %v", err)
+				// Don't return error - the status is cached and will be synced later
 			}
 		} else {
 			err = client.NewModelService[models.Task]().ReplaceById(r.t.Id, *r.t)
 			if err != nil {
-				return err
+				r.Warnf("failed to update task in database, but cached locally: %v", err)
+				// Don't return error - the status is cached and will be synced later
 			}
 		}
 
-		// update stats
-		r.updateTaskStat(status)
-		r.updateSpiderStat(status)
+		// update stats (only if database update succeeded)
+		if err == nil {
+			r.updateTaskStat(status)
+			r.updateSpiderStat(status)
+		}
 
 		// send notification
 		go r.sendNotification()
@@ -703,7 +724,7 @@ func (r *Runner) reconnectWithRetry() error {
 		r.lastConnCheck = time.Now()
 		r.connRetryAttempts = 0
 		r.Infof("successfully reconnected to task service after %d attempts", attempt+1)
-		
+
 		// Reset log circuit breaker when connection is restored
 		r.logConnMutex.Lock()
 		if !r.logConnHealthy {
@@ -712,7 +733,14 @@ func (r *Runner) reconnectWithRetry() error {
 			r.Logger.Info("log circuit breaker reset after successful reconnection")
 		}
 		r.logConnMutex.Unlock()
-		
+
+		// Sync pending status updates after successful reconnection
+		go func() {
+			if err := r.syncPendingStatusUpdates(); err != nil {
+				r.Errorf("failed to sync pending status updates after reconnection: %v", err)
+			}
+		}()
+
 		return nil
 	}
 

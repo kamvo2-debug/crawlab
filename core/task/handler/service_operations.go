@@ -280,3 +280,12 @@ func (svc *Service) deleteRunner(taskId primitive.ObjectID) {
 	svc.Debugf("delete runner: taskId[%v]", taskId)
 	svc.runners.Delete(taskId)
 }
+
+// GetTaskRunner returns the task runner for the given task ID (public method for external access)
+func (svc *Service) GetTaskRunner(taskId primitive.ObjectID) interfaces.TaskRunner {
+	r, err := svc.getRunner(taskId)
+	if err != nil {
+		return nil
+	}
+	return r
+}

@@ -339,7 +339,7 @@ func newMasterService() *MasterService {
 		systemSvc:             system.GetSystemService(),
 		healthSvc:             GetHealthService(),
 		nodeMonitoringSvc:     NewNodeMonitoringService(cfgSvc),
-		taskReconciliationSvc: NewTaskReconciliationService(server),
+		taskReconciliationSvc: NewTaskReconciliationService(server, handler.GetTaskHandlerService()),
 		Logger:                utils.NewLogger("MasterService"),
 	}
 }
