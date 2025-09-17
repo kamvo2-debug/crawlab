@@ -1,7 +1,5 @@
 syntax = "proto3";
 
-import "entity/response.proto";
-
 package grpc;
 option go_package = ".;grpc";
 
@@ -31,6 +29,19 @@ message TaskServiceConnectRequest {
   bytes data = 3;
 }
 
+enum TaskServiceConnectResponseCode {
+  CONNECT_SUCCESS = 0;
+  CONNECT_ERROR = 1;
+  CONNECT_INVALID_REQUEST = 2;
+  CONNECT_TASK_NOT_FOUND = 3;
+}
+
+message TaskServiceConnectResponse {
+  TaskServiceConnectResponseCode code = 1;
+  string message = 2;
+  string error = 3;
+}
+
 message TaskServiceFetchTaskRequest {
   string node_key = 1;
 }
@@ -44,9 +55,44 @@ message TaskServiceSendNotificationRequest {
   string task_id = 2;
 }
 
+enum TaskServiceSendNotificationResponseCode {
+  NOTIFICATION_SUCCESS = 0;
+  NOTIFICATION_ERROR = 1;
+  NOTIFICATION_DISABLED = 2;
+}
+
+message TaskServiceSendNotificationResponse {
+  TaskServiceSendNotificationResponseCode code = 1;
+  string message = 2;
+  string error = 3;
+}
+
+message TaskServiceCheckProcessRequest {
+  string task_id = 1;
+  int32 pid = 2;
+}
+
+enum ProcessStatus {
+  PROCESS_UNKNOWN = 0;
+  PROCESS_RUNNING = 1;
+  PROCESS_FINISHED = 2;
+  PROCESS_ERROR = 3;
+  PROCESS_NOT_FOUND = 4;
+  PROCESS_ZOMBIE = 5;
+}
+
+message TaskServiceCheckProcessResponse {
+  string task_id = 1;
+  int32 pid = 2;
+  ProcessStatus status = 3;
+  int32 exit_code = 4;
+  string error_message = 5;
+}
+
 service TaskService {
   rpc Subscribe(TaskServiceSubscribeRequest) returns (stream TaskServiceSubscribeResponse){};
-  rpc Connect(stream TaskServiceConnectRequest) returns (Response){};
+  rpc Connect(stream TaskServiceConnectRequest) returns (stream TaskServiceConnectResponse){};
   rpc FetchTask(TaskServiceFetchTaskRequest) returns (TaskServiceFetchTaskResponse){};
-  rpc SendNotification(TaskServiceSendNotificationRequest) returns (Response){};
+  rpc SendNotification(TaskServiceSendNotificationRequest) returns (TaskServiceSendNotificationResponse){};
+  rpc CheckProcess(TaskServiceCheckProcessRequest) returns (TaskServiceCheckProcessResponse){};
 }

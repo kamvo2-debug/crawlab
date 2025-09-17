@@ -264,9 +264,12 @@ func (svr TaskServiceServer) FetchTask(ctx context.Context, request *grpc.TaskSe
 	return &grpc.TaskServiceFetchTaskResponse{TaskId: tid.Hex()}, nil
 }
 
-func (svr TaskServiceServer) SendNotification(_ context.Context, request *grpc.TaskServiceSendNotificationRequest) (response *grpc.Response, err error) {
+func (svr TaskServiceServer) SendNotification(_ context.Context, request *grpc.TaskServiceSendNotificationRequest) (response *grpc.TaskServiceSendNotificationResponse, err error) {
 	if !utils.IsPro() {
-		return nil, nil
+		return &grpc.TaskServiceSendNotificationResponse{
+			Code:    grpc.TaskServiceSendNotificationResponseCode_NOTIFICATION_DISABLED,
+			Message: "Notification service is disabled (Pro version required)",
+		}, nil
 	}
 
 	// task id
@@ -363,7 +366,91 @@ func (svr TaskServiceServer) SendNotification(_ context.Context, request *grpc.T
 		}
 	}
 
-	return nil, nil
+	return &grpc.TaskServiceSendNotificationResponse{
+		Code:    grpc.TaskServiceSendNotificationResponseCode_NOTIFICATION_SUCCESS,
+		Message: "Notification sent successfully",
+	}, nil
+}
+
+func (svr TaskServiceServer) CheckProcess(_ context.Context, request *grpc.TaskServiceCheckProcessRequest) (response *grpc.TaskServiceCheckProcessResponse, err error) {
+	// Validate request
+	_, err = primitive.ObjectIDFromHex(request.TaskId)
+	if err != nil {
+		svr.Errorf("invalid task id: %s", request.TaskId)
+		return &grpc.TaskServiceCheckProcessResponse{
+			TaskId:       request.TaskId,
+			Pid:          request.Pid,
+			Status:       grpc.ProcessStatus_PROCESS_UNKNOWN,
+			ErrorMessage: "invalid task id",
+		}, nil
+	}
+
+	pid := int(request.Pid)
+	if pid <= 0 {
+		return &grpc.TaskServiceCheckProcessResponse{
+			TaskId:       request.TaskId,
+			Pid:          request.Pid,
+			Status:       grpc.ProcessStatus_PROCESS_NOT_FOUND,
+			ErrorMessage: "invalid process id",
+		}, nil
+	}
+
+	// Check if process exists
+	processExists := utils.ProcessIdExists(pid)
+	if !processExists {
+		return &grpc.TaskServiceCheckProcessResponse{
+			TaskId:   request.TaskId,
+			Pid:      request.Pid,
+			Status:   grpc.ProcessStatus_PROCESS_NOT_FOUND,
+			ExitCode: -1,
+		}, nil
+	}
+
+	// Get process details using gopsutil
+	processStatus, exitCode, errMsg := svr.getProcessDetails(pid)
+
+	return &grpc.TaskServiceCheckProcessResponse{
+		TaskId:       request.TaskId,
+		Pid:          request.Pid,
+		Status:       processStatus,
+		ExitCode:     int32(exitCode),
+		ErrorMessage: errMsg,
+	}, nil
+}
+
+// getProcessDetails queries the process details using gopsutil
+func (svr TaskServiceServer) getProcessDetails(pid int) (status grpc.ProcessStatus, exitCode int, errorMessage string) {
+	// Import the gopsutil process package
+	processLib, err := utils.GetProcesses()
+	if err != nil {
+		return grpc.ProcessStatus_PROCESS_UNKNOWN, -1, fmt.Sprintf("failed to get processes: %v", err)
+	}
+
+	// Find the specific process
+	for _, p := range processLib {
+		if int(p.Pid) == pid {
+			// Get process status
+			processStatus, err := p.Status()
+			if err != nil {
+				return grpc.ProcessStatus_PROCESS_UNKNOWN, -1, fmt.Sprintf("failed to get process status: %v", err)
+			}
+
+			// Map process status to our enum
+			switch strings.ToLower(processStatus) {
+			case "running", "sleep", "disk-sleep":
+				return grpc.ProcessStatus_PROCESS_RUNNING, 0, ""
+			case "zombie":
+				return grpc.ProcessStatus_PROCESS_ZOMBIE, 0, "process is zombie"
+			case "stopped", "tracing-stop":
+				return grpc.ProcessStatus_PROCESS_FINISHED, 0, "process stopped"
+			default:
+				return grpc.ProcessStatus_PROCESS_UNKNOWN, -1, fmt.Sprintf("unknown process status: %s", processStatus)
+			}
+		}
+	}
+
+	// Process not found
+	return grpc.ProcessStatus_PROCESS_NOT_FOUND, -1, "process not found"
 }
 
 func (svr TaskServiceServer) GetSubscribeStream(taskId primitive.ObjectID) (stream grpc.TaskService_SubscribeServer, ok bool) {

@@ -73,6 +73,9 @@ func (svc *MasterService) Start() {
 	// start monitoring worker nodes
 	go svc.startMonitoring()
 
+	// start task reconciliation service for periodic status checks
+	go svc.taskReconciliationSvc.StartPeriodicReconciliation()
+
 	// start task handler
 	go svc.taskHandlerSvc.Start()
 
