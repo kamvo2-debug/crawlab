@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +26,8 @@ type TaskReconciliationService struct {
 	taskHandlerSvc *handler.Service // access to task handlers and their status caches
 	interfaces.Logger
 }
+
+const staleReconciliationThreshold = 15 * time.Minute
 
 // HandleTasksForOfflineNode updates all running tasks on an offline node to abnormal status
 func (svc *TaskReconciliationService) HandleTasksForOfflineNode(node *models.Node) {
@@ -51,6 +54,7 @@ func (svc *TaskReconciliationService) HandleTasksForOfflineNode(node *models.Nod
 	for _, task := range runningTasks {
 		task.Status = constants.TaskStatusNodeDisconnected
 		task.Error = "Task temporarily disconnected due to worker node offline"
+		task.SetUpdated(primitive.NilObjectID)
 
 		// Update the task in database
 		err := backoff.Retry(func() error {
@@ -144,6 +148,7 @@ func (svc *TaskReconciliationService) HandleNodeReconnection(node *models.Node) 
 		}
 
 		// Update the task in database
+		task.SetUpdated(primitive.NilObjectID)
 		err = backoff.Retry(func() error {
 			return service.NewModelService[models.Task]().ReplaceById(task.Id, task)
 		}, backoff.WithMaxRetries(backoff.NewConstantBackOff(500*time.Millisecond), 3))
@@ -385,10 +390,64 @@ func (svc *TaskReconciliationService) updateTaskStatusReliably(task *models.Task
 		// The disconnect reason should already be in the error field
 	}
 
+	task.SetUpdated(primitive.NilObjectID)
+
 	// Update with retry logic
 	return backoff.Retry(func() error {
 		return service.NewModelService[models.Task]().ReplaceById(task.Id, *task)
 	}, backoff.WithMaxRetries(backoff.NewConstantBackOff(500*time.Millisecond), 3))
+}
+
+func (svc *TaskReconciliationService) shouldMarkTaskAbnormal(task *models.Task) bool {
+	if task == nil {
+		return false
+	}
+
+	if svc.IsTaskStatusFinal(task.Status) {
+		return false
+	}
+
+	if task.Status != constants.TaskStatusNodeDisconnected {
+		return false
+	}
+
+	lastUpdated := task.UpdatedAt
+	if lastUpdated.IsZero() {
+		lastUpdated = task.CreatedAt
+	}
+
+	if lastUpdated.IsZero() {
+		return false
+	}
+
+	return time.Since(lastUpdated) >= staleReconciliationThreshold
+}
+
+func (svc *TaskReconciliationService) markTaskAbnormal(task *models.Task, cause error) error {
+	if task == nil {
+		return fmt.Errorf("task is nil")
+	}
+
+	reasonParts := make([]string, 0, 2)
+	if cause != nil {
+		reasonParts = append(reasonParts, fmt.Sprintf("last reconciliation error: %v", cause))
+	}
+	reasonParts = append(reasonParts, fmt.Sprintf("task status not reconciled for %s", staleReconciliationThreshold))
+	reason := strings.Join(reasonParts, "; ")
+
+	if task.Error == "" {
+		task.Error = reason
+	} else if !strings.Contains(task.Error, reason) {
+		task.Error = fmt.Sprintf("%s; %s", task.Error, reason)
+	}
+
+	if err := svc.updateTaskStatusReliably(task, constants.TaskStatusAbnormal); err != nil {
+		svc.Errorf("failed to mark task[%s] abnormal after reconciliation timeout: %v", task.Id.Hex(), err)
+		return err
+	}
+
+	svc.Warnf("marked task[%s] as abnormal after %s of unresolved reconciliation", task.Id.Hex(), staleReconciliationThreshold)
+	return nil
 }
 
 // StartPeriodicReconciliation starts a background service to periodically reconcile task status
@@ -451,8 +510,12 @@ func (svc *TaskReconciliationService) reconcileTaskStatus(task *models.Task) err
 	actualStatus, err := svc.GetActualTaskStatusFromWorker(node, task)
 	if err != nil {
 		svc.Warnf("failed to get actual status for task[%s]: %v", task.Id.Hex(), err)
-		// Don't change the status if we can't determine the actual state
-		// This is more honest than making assumptions
+		if svc.shouldMarkTaskAbnormal(task) {
+			if updateErr := svc.markTaskAbnormal(task, err); updateErr != nil {
+				return updateErr
+			}
+			return nil
+		}
 		return err
 	}
 

@@ -12,36 +12,38 @@ import (
 )
 
 const (
-	DefaultWorkspace           = "crawlab_workspace"
-	DefaultTaskLogPath         = "/var/log/crawlab/tasks"
-	DefaultServerHost          = "0.0.0.0"
-	DefaultServerPort          = 8000
-	DefaultGrpcHost            = "localhost"
-	DefaultGrpcPort            = 9666
-	DefaultGrpcServerHost      = "0.0.0.0"
-	DefaultGrpcServerPort      = 9666
-	DefaultAuthKey             = "Crawlab2024!"
-	DefaultApiEndpoint         = "http://localhost:8000"
-	DefaultApiAllowOrigin      = "*"
-	DefaultApiAllowCredentials = "true"
-	DefaultApiAllowMethods     = "DELETE, POST, OPTIONS, GET, PUT"
-	DefaultApiAllowHeaders     = "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With"
-	DefaultApiPort             = 8080
-	DefaultApiPath             = "/api"
-	DefaultNodeMaxRunners      = 20  // Default max concurrent task runners per node
-	DefaultTaskQueueSize       = 100 // Default task queue size per node
-	DefaultInstallRoot         = "/app/install"
-	DefaultInstallEnvs         = ""
-	MetadataConfigDirName      = ".crawlab"
-	MetadataConfigName         = "config.json"
-	DefaultPyenvPath           = "/root/.pyenv"
-	DefaultNodeModulesPath     = "/usr/lib/node_modules"
-	DefaultNodeBinPath         = "/usr/lib/node_bin"
-	DefaultGoPath              = "/root/go"
-	DefaultMCPServerHost       = "0.0.0.0"
-	DefaultMCPServerPort       = 9777
-	DefaultMCPClientBaseUrl    = "http://localhost:9777/sse"
-	DefaultOpenAPIUrlPath      = "/openapi.json"
+	DefaultWorkspace                  = "crawlab_workspace"
+	DefaultTaskLogPath                = "/var/log/crawlab/tasks"
+	DefaultServerHost                 = "0.0.0.0"
+	DefaultServerPort                 = 8000
+	DefaultGrpcHost                   = "localhost"
+	DefaultGrpcPort                   = 9666
+	DefaultGrpcServerHost             = "0.0.0.0"
+	DefaultGrpcServerPort             = 9666
+	DefaultAuthKey                    = "Crawlab2024!"
+	DefaultApiEndpoint                = "http://localhost:8000"
+	DefaultApiAllowOrigin             = "*"
+	DefaultApiAllowCredentials        = "true"
+	DefaultApiAllowMethods            = "DELETE, POST, OPTIONS, GET, PUT"
+	DefaultApiAllowHeaders            = "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With"
+	DefaultApiPort                    = 8080
+	DefaultApiPath                    = "/api"
+	DefaultNodeMaxRunners             = 20  // Default max concurrent task runners per node
+	DefaultTaskQueueSize              = 100 // Default task queue size per node
+	DefaultInstallRoot                = "/app/install"
+	DefaultInstallEnvs                = ""
+	MetadataConfigDirName             = ".crawlab"
+	MetadataConfigName                = "config.json"
+	DefaultPyenvPath                  = "/root/.pyenv"
+	DefaultNodeModulesPath            = "/usr/lib/node_modules"
+	DefaultNodeBinPath                = "/usr/lib/node_bin"
+	DefaultGoPath                     = "/root/go"
+	DefaultMCPServerHost              = "0.0.0.0"
+	DefaultMCPServerPort              = 9777
+	DefaultMCPClientBaseUrl           = "http://localhost:9777/sse"
+	DefaultOpenAPIUrlPath             = "/openapi.json"
+	DefaultSyncDownloadMaxConcurrency = 16
+	DefaultMinFileDescriptorLimit     = 8192
 )
 
 func IsDev() bool {
@@ -331,4 +333,18 @@ func GetOpenAPIUrl() string {
 		return res
 	}
 	return GetApiEndpoint() + DefaultOpenAPIUrlPath
+}
+
+func GetSyncDownloadMaxConcurrency() int64 {
+	if res := viper.GetInt("sync.download.max_concurrency"); res > 0 {
+		return int64(res)
+	}
+	return int64(DefaultSyncDownloadMaxConcurrency)
+}
+
+func GetMinFileDescriptorLimit() uint64 {
+	if res := viper.GetUint64("system.fd_min"); res > 0 {
+		return res
+	}
+	return DefaultMinFileDescriptorLimit
 }

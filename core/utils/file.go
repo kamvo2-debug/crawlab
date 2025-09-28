@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"sync"
+	"time"
 
 	"github.com/crawlab-team/crawlab/core/entity"
+	"golang.org/x/sync/singleflight"
 )
 
 func OpenFile(fileName string) *os.File {
@@ -184,11 +188,54 @@ func GetFileHash(filePath string) (res string, err error) {
 }
 
 const IgnoreFileRegexPattern = `(^node_modules|__pycache__)/|\.(tmp|temp|log|swp|swo|bak|orig|lock|pid|pyc|pyo)$`
+const scanDirectoryCacheTTL = 3 * time.Second
 
-func ScanDirectory(dir string) (res entity.FsFileInfoMap, err error) {
+var (
+	scanDirectoryGroup singleflight.Group
+	scanDirectoryCache = struct {
+		sync.RWMutex
+		items map[string]scanDirectoryCacheEntry
+	}{items: make(map[string]scanDirectoryCacheEntry)}
+)
+
+type scanDirectoryCacheEntry struct {
+	data      entity.FsFileInfoMap
+	expiresAt time.Time
+}
+
+func ScanDirectory(dir string) (entity.FsFileInfoMap, error) {
+	if res, ok := getScanDirectoryCache(dir); ok {
+		return cloneFsFileInfoMap(res), nil
+	}
+
+	v, err, _ := scanDirectoryGroup.Do(dir, func() (any, error) {
+		if res, ok := getScanDirectoryCache(dir); ok {
+			return cloneFsFileInfoMap(res), nil
+		}
+
+		files, err := scanDirectoryInternal(dir)
+		if err != nil {
+			return nil, err
+		}
+
+		setScanDirectoryCache(dir, files)
+		return cloneFsFileInfoMap(files), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	res, ok := v.(entity.FsFileInfoMap)
+	if !ok {
+		return nil, fmt.Errorf("unexpected cache value type: %T", v)
+	}
+
+	return cloneFsFileInfoMap(res), nil
+}
+
+func scanDirectoryInternal(dir string) (entity.FsFileInfoMap, error) {
 	files := make(entity.FsFileInfoMap)
 
-	// Compile the ignore pattern regex
 	ignoreRegex, err := regexp.Compile(IgnoreFileRegexPattern)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile ignore pattern: %v", err)
@@ -204,7 +251,6 @@ func ScanDirectory(dir string) (res entity.FsFileInfoMap, err error) {
 			return err
 		}
 
-		// Skip files that match the ignore pattern
 		if ignoreRegex.MatchString(relPath) {
 			if info.IsDir() {
 				return filepath.SkipDir
@@ -238,4 +284,34 @@ func ScanDirectory(dir string) (res entity.FsFileInfoMap, err error) {
 	}
 
 	return files, nil
+}
+
+func getScanDirectoryCache(dir string) (entity.FsFileInfoMap, bool) {
+	scanDirectoryCache.RLock()
+	defer scanDirectoryCache.RUnlock()
+
+	entry, ok := scanDirectoryCache.items[dir]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil, false
+	}
+	return entry.data, true
+}
+
+func setScanDirectoryCache(dir string, data entity.FsFileInfoMap) {
+	scanDirectoryCache.Lock()
+	defer scanDirectoryCache.Unlock()
+
+	scanDirectoryCache.items[dir] = scanDirectoryCacheEntry{
+		data:      data,
+		expiresAt: time.Now().Add(scanDirectoryCacheTTL),
+	}
+}
+
+func cloneFsFileInfoMap(src entity.FsFileInfoMap) entity.FsFileInfoMap {
+	if src == nil {
+		return nil
+	}
+	dst := make(entity.FsFileInfoMap, len(src))
+	maps.Copy(dst, src)
+	return dst
 }

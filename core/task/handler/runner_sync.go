@@ -5,15 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/crawlab-team/crawlab/core/entity"
 	"github.com/crawlab-team/crawlab/core/utils"
+)
+
+const (
+	syncHTTPRequestMaxRetries     = 5
+	syncHTTPRequestInitialBackoff = 200 * time.Millisecond
+	syncHTTPRequestMaxBackoff     = 3 * time.Second
+	syncHTTPRequestClientTimeout  = 30 * time.Second
+)
+
+var (
+	syncHttpClient = &http.Client{Timeout: syncHTTPRequestClientTimeout}
+	jitterRand     = rand.New(rand.NewSource(time.Now().UnixNano()))
+	jitterMutex    sync.Mutex
 )
 
 // syncFiles synchronizes files between master and worker nodes:
@@ -136,10 +151,8 @@ func (r *Runner) syncFiles() (err error) {
 }
 
 func (r *Runner) performHttpRequest(method, path string, params url.Values) (*http.Response, error) {
-	// Normalize path
 	path = strings.TrimPrefix(path, "/")
 
-	// Construct master URL
 	var id string
 	if r.s.GitId.IsZero() {
 		id = r.s.Id.Hex()
@@ -148,17 +161,74 @@ func (r *Runner) performHttpRequest(method, path string, params url.Values) (*ht
 	}
 	requestUrl := fmt.Sprintf("%s/sync/%s/%s?%s", utils.GetApiEndpoint(), id, path, params.Encode())
 
-	// Create and execute request
-	req, err := http.NewRequest(method, requestUrl, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating request: %v", err)
+	backoff := syncHTTPRequestInitialBackoff
+	var lastErr error
+
+	for attempt := range syncHTTPRequestMaxRetries {
+		req, err := http.NewRequest(method, requestUrl, nil)
+		if err != nil {
+			return nil, fmt.Errorf("error creating request: %v", err)
+		}
+
+		for k, v := range r.getHttpRequestHeaders() {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := syncHttpClient.Do(req)
+		if err == nil && !shouldRetryStatus(resp.StatusCode) {
+			return resp, nil
+		}
+
+		if err == nil {
+			lastErr = fmt.Errorf("received retryable status %d for %s", resp.StatusCode, requestUrl)
+			_ = resp.Body.Close()
+		} else {
+			lastErr = err
+		}
+
+		wait := backoff + jitterDuration(backoff/2)
+		if wait > syncHTTPRequestMaxBackoff {
+			wait = syncHTTPRequestMaxBackoff
+		}
+
+		r.Warnf("retrying %s %s in %s (attempt %d/%d): %v", method, requestUrl, wait, attempt+1, syncHTTPRequestMaxRetries, lastErr)
+		time.Sleep(wait)
+
+		if backoff < syncHTTPRequestMaxBackoff {
+			backoff *= 2
+			if backoff > syncHTTPRequestMaxBackoff {
+				backoff = syncHTTPRequestMaxBackoff
+			}
+		}
 	}
 
-	for k, v := range r.getHttpRequestHeaders() {
-		req.Header.Set(k, v)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("exceeded max retries for %s", requestUrl)
 	}
+	return nil, lastErr
+}
 
-	return http.DefaultClient.Do(req)
+func shouldRetryStatus(status int) bool {
+	if status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status == http.StatusTooEarly {
+		return true
+	}
+	switch status {
+	case http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	}
+	return status >= 500
+}
+
+func jitterDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	jitterMutex.Lock()
+	defer jitterMutex.Unlock()
+	return time.Duration(jitterRand.Int63n(int64(max)))
 }
 
 // downloadFile downloads a file from the master node and saves it to the local file system

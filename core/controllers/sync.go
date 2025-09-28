@@ -1,12 +1,20 @@
 package controllers
 
 import (
-	"github.com/crawlab-team/crawlab/core/entity"
-	"github.com/juju/errors"
+	"context"
 	"path/filepath"
+	"sync/atomic"
 
+	"github.com/crawlab-team/crawlab/core/entity"
 	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/juju/errors"
+	"golang.org/x/sync/semaphore"
+)
+
+var (
+	syncDownloadSemaphore = semaphore.NewWeighted(utils.GetSyncDownloadMaxConcurrency())
+	syncDownloadInFlight  int64
 )
 
 func GetSyncScan(c *gin.Context) (response *Response[entity.FsFileInfoMap], err error) {
@@ -14,12 +22,30 @@ func GetSyncScan(c *gin.Context) (response *Response[entity.FsFileInfoMap], err 
 	dirPath := filepath.Join(workspacePath, c.Param("id"), c.Param("path"))
 	files, err := utils.ScanDirectory(dirPath)
 	if err != nil {
+		logger.Warnf("sync scan failed id=%s path=%s: %v", c.Param("id"), c.Param("path"), err)
 		return GetErrorResponse[entity.FsFileInfoMap](err)
 	}
 	return GetDataResponse(files)
 }
 
 func GetSyncDownload(c *gin.Context) (err error) {
+	ctx := c.Request.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := syncDownloadSemaphore.Acquire(ctx, 1); err != nil {
+		logger.Warnf("failed to acquire sync download slot for id=%s path=%s: %v", c.Param("id"), c.Query("path"), err)
+		return errors.Annotate(err, "acquire sync download slot")
+	}
+	current := atomic.AddInt64(&syncDownloadInFlight, 1)
+	logger.Debugf("sync download in-flight=%d id=%s path=%s", current, c.Param("id"), c.Query("path"))
+	defer func() {
+		newVal := atomic.AddInt64(&syncDownloadInFlight, -1)
+		logger.Debugf("sync download completed in-flight=%d id=%s path=%s", newVal, c.Param("id"), c.Query("path"))
+		syncDownloadSemaphore.Release(1)
+	}()
+
 	workspacePath := utils.GetWorkspace()
 	filePath := filepath.Join(workspacePath, c.Param("id"), c.Query("path"))
 	if !utils.Exists(filePath) {
