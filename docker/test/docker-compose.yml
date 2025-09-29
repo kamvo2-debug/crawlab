@@ -15,8 +15,8 @@ services:
       CRAWLAB_PPROF: "true"
       CRAWLAB_LOG_LEVEL: "debug"
     ports:
-      - "8080:8080"
-      - "6060:6060"
+      - "${CRAWLAB_PORT:-8080}:8080"
+      - "${PPROF_PORT:-6060}:6060"
     depends_on:
       - mongo
     env_file:
