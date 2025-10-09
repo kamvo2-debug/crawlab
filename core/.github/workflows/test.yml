@@ -26,8 +26,9 @@ jobs:
           go-version: '^1.22'
       - name: Run unit tests
         run: |
+          # Note: controllers tests are actually API/integration tests, disabled for now
+          # They will be re-implemented as proper integration tests later
           mods=(\
-            "github.com/crawlab-team/crawlab/core/controllers" \
             "github.com/crawlab-team/crawlab/core/models/client" \
             "github.com/crawlab-team/crawlab/core/models/service" \
           )

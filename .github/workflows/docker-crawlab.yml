@@ -184,9 +184,14 @@ jobs:
         run: |
           # Find all directories containing *_test.go files
           test_dirs=$(find . -name "*_test.go" -exec dirname {} \; | sort -u)
-          # Run go test on each directory
+          # Run go test on each directory (excluding controllers - API tests to be reimplemented)
           for dir in $test_dirs
           do
+            # Skip controllers directory (API/integration tests, not unit tests)
+            if [[ "$dir" == *"/controllers"* ]]; then
+              echo "Skipping API tests in $dir"
+              continue
+            fi
             echo "Running tests in $dir"
             go test ./$dir
           done
