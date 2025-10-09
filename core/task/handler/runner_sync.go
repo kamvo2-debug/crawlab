@@ -250,7 +250,6 @@ func (r *Runner) downloadFile(path string, filePath string, fileInfo *entity.FsF
 
 	// create directory if not exists
 	dirPath := filepath.Dir(filePath)
-	utils.Exists(dirPath)
 	err = os.MkdirAll(dirPath, os.ModePerm)
 	if err != nil {
 		r.Errorf("error creating directory: %v", err)
