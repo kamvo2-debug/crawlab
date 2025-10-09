@@ -16,7 +16,7 @@ COPY ./vcs ./vcs/
 ENV GO111MODULE on
 
 # Build from the backend directory which contains the main.go
-RUN cd backend && go install -v ./...
+RUN cd backend && go mod tidy && go install -v ./...
 
 FROM alpine:3.14
 
