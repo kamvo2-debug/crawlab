@@ -196,7 +196,7 @@ func (r *Runner) Run() (err error) {
 	// sync files worker nodes
 	if !utils.IsMaster() {
 		if err := r.syncFiles(); err != nil {
-			return r.updateTask(constants.TaskStatusError, err)
+			r.Warnf("error synchronizing files: %v", err)
 		}
 	}
 
