@@ -182,19 +182,22 @@ jobs:
       - name: Run tests
         working-directory: ${{ matrix.package }}
         run: |
-          # Find all directories containing *_test.go files
-          test_dirs=$(find . -name "*_test.go" -exec dirname {} \; | sort -u)
-          # Run go test on each directory (excluding controllers - API tests to be reimplemented)
-          for dir in $test_dirs
-          do
-            # Skip controllers directory (API/integration tests, not unit tests)
-            if [[ "$dir" == *"/controllers"* ]]; then
-              echo "Skipping API tests in $dir"
-              continue
-            fi
-            echo "Running tests in $dir"
-            go test ./$dir
-          done
+          echo "============================================================"
+          echo "Backend unit tests disabled for package: ${{ matrix.package }}"
+          echo "============================================================"
+          echo ""
+          echo "Reason: Existing Go tests are integration tests requiring"
+          echo "infrastructure (MongoDB, gRPC servers), not true unit tests."
+          echo ""
+          echo "Use the proper integration test suite instead:"
+          echo "  cd tests/"
+          echo "  ./test-runner.py --list-specs"
+          echo ""
+          echo "For details, see:"
+          echo "  - BACKEND_TESTS_DISABLED.md (project root)"
+          echo "  - crawlab/core/BACKEND_TESTS_DISABLED.md"
+          echo "  - tests/TESTING_SOP.md"
+          echo "============================================================"
       - name: Set output
         id: set_output
         if: failure()

@@ -24,14 +24,18 @@ jobs:
       - uses: actions/setup-go@v3
         with:
           go-version: '^1.22'
-      - name: Run unit tests
+      - name: Skip backend unit tests
         run: |
-          # Note: controllers tests are actually API/integration tests, disabled for now
-          # They will be re-implemented as proper integration tests later
-          mods=(\
-            "github.com/crawlab-team/crawlab/core/models/client" \
-            "github.com/crawlab-team/crawlab/core/models/service" \
-          )
-          for pkg in ${mods[@]}; do
-            go test ${pkg}
-          done
+          echo "============================================================"
+          echo "Backend unit tests disabled"
+          echo "============================================================"
+          echo ""
+          echo "Reason: Existing tests are integration tests requiring"
+          echo "infrastructure (MongoDB, gRPC servers), not true unit tests."
+          echo ""
+          echo "Use the proper integration test suite instead:"
+          echo "  cd tests/"
+          echo "  ./test-runner.py --list-specs"
+          echo ""
+          echo "See crawlab/core/BACKEND_TESTS_DISABLED.md for details."
+          echo "============================================================"
