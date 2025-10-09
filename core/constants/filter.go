@@ -1,15 +1,15 @@
 package constants
 
 const (
-	FilterQueryFieldConditions = "conditions"
-	FilterQueryFieldAll        = "all"
-	FilterQueryFieldFilter     = "filter"
+	FilterQueryFieldFilter = "filter"
 )
 
 const (
 	FilterOpNotSet           = "ns"
-	FilterOpContains         = "c"
-	FilterOpNotContains      = "nc"
+	FilterOpContains         = "contains"
+	FilterOpContainsShort    = "c"
+	FilterOpNotContainsShort = "nc"
+	FilterOpNotContains      = "not-contains"
 	FilterOpRegex            = "r"
 	FilterOpEqual            = "eq"
 	FilterOpNotEqual         = "ne"
@@ -19,5 +19,6 @@ const (
 	FilterOpLessThan         = "lt"
 	FilterOpGreaterThanEqual = "gte"
 	FilterOpLessThanEqual    = "lte"
-	FilterOpSearch           = "s"
+	FilterOpSearchShort      = "s"
+	FilterOpSearch           = "search"
 )

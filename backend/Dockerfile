@@ -1,4 +1,4 @@
-FROM golang:1.22.9 AS build
+FROM golang:1.23 AS build
 
 # Context path is the root of the repository
 

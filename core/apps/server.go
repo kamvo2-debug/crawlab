@@ -2,13 +2,14 @@ package apps
 
 import (
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
+	"sync"
+
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"github.com/crawlab-team/crawlab/core/node/service"
 	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/spf13/viper"
-	"net/http"
-	_ "net/http/pprof"
-	"sync"
 )
 
 type Server struct {

@@ -1,21 +1,21 @@
 package entity
 
 import (
-	"github.com/crawlab-team/crawlab/core/interfaces"
+	"go.mongodb.org/mongo-driver/bson"
 	"time"
 )
 
 type Export struct {
-	Id           string            `json:"id"`
-	Type         string            `json:"type"`
-	Target       string            `json:"target"`
-	Filter       interfaces.Filter `json:"filter"`
-	Status       string            `json:"status"`
-	StartTs      time.Time         `json:"start_ts"`
-	EndTs        time.Time         `json:"end_ts"`
-	FileName     string            `json:"file_name"`
-	DownloadPath string            `json:"-"`
-	Limit        int               `json:"-"`
+	Id           string    `json:"id"`
+	Type         string    `json:"type"`
+	Target       string    `json:"target"`
+	Query        bson.M    `json:"query"`
+	Status       string    `json:"status"`
+	StartedAt    time.Time `json:"started_at"`
+	EndedAt      time.Time `json:"ended_at"`
+	FileName     string    `json:"file_name"`
+	DownloadPath string    `json:"-"`
+	Limit        int       `json:"-"`
 }
 
 func (e *Export) GetId() string {
@@ -30,8 +30,8 @@ func (e *Export) GetTarget() string {
 	return e.Target
 }
 
-func (e *Export) GetFilter() interfaces.Filter {
-	return e.Filter
+func (e *Export) GetQuery() bson.M {
+	return e.Query
 }
 
 func (e *Export) GetStatus() string {
@@ -39,11 +39,11 @@ func (e *Export) GetStatus() string {
 }
 
 func (e *Export) GetStartTs() time.Time {
-	return e.StartTs
+	return e.StartedAt
 }
 
 func (e *Export) GetEndTs() time.Time {
-	return e.EndTs
+	return e.EndedAt
 }
 
 func (e *Export) GetDownloadPath() string {

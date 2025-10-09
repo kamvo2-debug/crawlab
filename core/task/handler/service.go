@@ -2,8 +2,11 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"runtime"
+	"sync"
+	"time"
+
 	"github.com/crawlab-team/crawlab/core/constants"
 	grpcclient "github.com/crawlab-team/crawlab/core/grpc/client"
 	"github.com/crawlab-team/crawlab/core/interfaces"
@@ -15,9 +18,6 @@ import (
 	"github.com/crawlab-team/crawlab/grpc"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"io"
-	"sync"
-	"time"
 )
 
 type Service struct {
@@ -32,10 +32,24 @@ type Service struct {
 	cancelTimeout  time.Duration
 
 	// internals variables
-	stopped   bool
-	mu        sync.Mutex
-	runners   sync.Map // pool of task runners started
-	syncLocks sync.Map // files sync locks map of task runners
+	ctx     context.Context
+	cancel  context.CancelFunc
+	stopped bool
+	mu      sync.RWMutex
+	runners sync.Map       // pool of task runners started
+	wg      sync.WaitGroup // track background goroutines
+
+	// tickers for cleanup
+	fetchTicker  *time.Ticker
+	reportTicker *time.Ticker
+
+	// worker pool for bounded task execution
+	workerPool *TaskWorkerPool
+	maxWorkers int
+
+	// stream manager for leak-free stream handling
+	streamManager *StreamManager
+
 	interfaces.Logger
 }
 
@@ -43,84 +57,218 @@ func (svc *Service) Start() {
 	// wait for grpc client ready
 	grpcclient.GetGrpcClient().WaitForReady()
 
+	// Initialize tickers
+	svc.fetchTicker = time.NewTicker(svc.fetchInterval)
+	svc.reportTicker = time.NewTicker(svc.reportInterval)
+
+	// Get max workers from current node configuration
+	svc.maxWorkers = svc.getCurrentNodeMaxRunners()
+
+	// Initialize and start worker pool with dynamic max workers
+	svc.workerPool = NewTaskWorkerPool(svc.maxWorkers, svc)
+	svc.workerPool.Start()
+
+	// Initialize and start stream manager
+	svc.streamManager.Start()
+
+	// Start goroutine monitoring (adds to WaitGroup internally)
+	svc.startGoroutineMonitoring()
+
+	// Start background goroutines with WaitGroup tracking
+	svc.wg.Add(2)
 	go svc.reportStatus()
 	go svc.fetchAndRunTasks()
+
+	queueSize := cap(svc.workerPool.taskQueue)
+	if svc.maxWorkers == -1 {
+		svc.Infof("Task handler service started with unlimited workers (from node config) and queue size %d", queueSize)
+	} else {
+		svc.Infof("Task handler service started with %d max workers (from node config) and queue size %d", svc.maxWorkers, queueSize)
+	}
+
+	// Start the stuck task cleanup routine (adds to WaitGroup internally)
+	svc.startStuckTaskCleanup()
 }
 
 func (svc *Service) Stop() {
+	svc.mu.Lock()
+	if svc.stopped {
+		svc.mu.Unlock()
+		return
+	}
 	svc.stopped = true
+	svc.mu.Unlock()
+
+	svc.Infof("Stopping task handler service...")
+
+	// Cancel context to signal all goroutines to stop
+	if svc.cancel != nil {
+		svc.cancel()
+	}
+
+	// Stop worker pool first
+	if svc.workerPool != nil {
+		svc.workerPool.Stop()
+	}
+
+	// Stop stream manager
+	if svc.streamManager != nil {
+		svc.streamManager.Stop()
+	}
+
+	// Stop tickers to prevent new tasks
+	if svc.fetchTicker != nil {
+		svc.fetchTicker.Stop()
+	}
+	if svc.reportTicker != nil {
+		svc.reportTicker.Stop()
+	}
+
+	// Cancel all running tasks gracefully
+	svc.stopAllRunners()
+
+	// Wait for all background goroutines to finish
+	done := make(chan struct{})
+	go func() {
+		svc.wg.Wait()
+		close(done)
+	}()
+
+	// Give goroutines time to finish gracefully, then force stop
+	select {
+	case <-done:
+		svc.Infof("All goroutines stopped gracefully")
+	case <-time.After(30 * time.Second):
+		svc.Warnf("Some goroutines did not stop gracefully within timeout")
+	}
+
+	svc.Infof("Task handler service stopped")
 }
 
-func (svc *Service) Run(taskId primitive.ObjectID) (err error) {
-	return svc.runTask(taskId)
-}
+func (svc *Service) startGoroutineMonitoring() {
+	svc.wg.Add(1) // Track goroutine monitoring in WaitGroup
+	go func() {
+		defer svc.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				svc.Errorf("[TaskHandler] goroutine monitoring panic: %v", r)
+			}
+		}()
 
-func (svc *Service) Cancel(taskId primitive.ObjectID, force bool) (err error) {
-	return svc.cancelTask(taskId, force)
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		initialCount := runtime.NumGoroutine()
+		svc.Infof("[TaskHandler] initial goroutine count: %d", initialCount)
+
+		for {
+			select {
+			case <-svc.ctx.Done():
+				svc.Infof("[TaskHandler] goroutine monitoring shutting down")
+				return
+			case <-ticker.C:
+				currentCount := runtime.NumGoroutine()
+				if currentCount > initialCount+50 { // Alert if 50+ more goroutines than initial
+					svc.Warnf("[TaskHandler] potential goroutine leak detected - current: %d, initial: %d, diff: %d",
+						currentCount, initialCount, currentCount-initialCount)
+				} else {
+					svc.Debugf("[TaskHandler] goroutine count: %d (initial: %d)", currentCount, initialCount)
+				}
+			}
+		}
+	}()
 }
 
 func (svc *Service) fetchAndRunTasks() {
-	ticker := time.NewTicker(svc.fetchInterval)
-	for {
-		if svc.stopped {
-			return
+	defer svc.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			svc.Errorf("fetchAndRunTasks panic recovered: %v", r)
 		}
+	}()
 
+	for {
 		select {
-		case <-ticker.C:
-			// current node
-			n, err := svc.GetCurrentNode()
-			if err != nil {
-				continue
-			}
-
-			// skip if node is not active or enabled
-			if !n.Active || !n.Enabled {
-				continue
-			}
-
-			// validate if max runners is reached (max runners = 0 means no limit)
-			if n.MaxRunners > 0 && svc.getRunnerCount() >= n.MaxRunners {
-				continue
-			}
-
-			// fetch task id
-			tid, err := svc.fetchTask()
-			if err != nil {
-				continue
-			}
-
-			// skip if no task id
-			if tid.IsZero() {
-				continue
-			}
-
-			// run task
-			if err := svc.runTask(tid); err != nil {
-				t, err := svc.GetTaskById(tid)
-				if err != nil && t.Status != constants.TaskStatusCancelled {
-					t.Error = err.Error()
-					t.Status = constants.TaskStatusError
-					t.SetUpdated(t.CreatedBy)
-					_ = client.NewModelService[models.Task]().ReplaceById(t.Id, *t)
-					continue
-				}
-				continue
+		case <-svc.ctx.Done():
+			svc.Infof("fetchAndRunTasks stopped by context")
+			return
+		case <-svc.fetchTicker.C:
+			// Use a separate context with timeout for each operation
+			if err := svc.processFetchCycle(); err != nil {
+				//svc.Debugf("fetch cycle error: %v", err)
 			}
 		}
 	}
 }
 
-func (svc *Service) reportStatus() {
-	ticker := time.NewTicker(svc.reportInterval)
-	for {
-		if svc.stopped {
-			return
-		}
+func (svc *Service) processFetchCycle() error {
+	// Check if stopped
+	svc.mu.RLock()
+	stopped := svc.stopped
+	svc.mu.RUnlock()
 
+	if stopped {
+		return fmt.Errorf("service stopped")
+	}
+
+	// current node
+	n, err := svc.GetCurrentNode()
+	if err != nil {
+		return fmt.Errorf("failed to get current node: %w", err)
+	}
+
+	// skip if node is not active or enabled
+	if !n.Active || !n.Enabled {
+		return fmt.Errorf("node not active or enabled")
+	}
+
+	// validate if max runners is reached (max runners = 0 means no limit)
+	if n.MaxRunners > 0 && svc.getRunnerCount() >= n.MaxRunners {
+		return fmt.Errorf("max runners reached")
+	}
+
+	// fetch task id
+	tid, err := svc.fetchTask()
+	if err != nil {
+		return fmt.Errorf("failed to fetch task: %w", err)
+	}
+
+	// skip if no task id
+	if tid.IsZero() {
+		return fmt.Errorf("no task available")
+	}
+
+	// run task - now using worker pool instead of unlimited goroutines
+	if err := svc.runTask(tid); err != nil {
+		// Handle task error
+		t, getErr := svc.GetTaskById(tid)
+		if getErr == nil && t.Status != constants.TaskStatusCancelled {
+			t.Error = err.Error()
+			t.Status = constants.TaskStatusError
+			t.SetUpdated(t.CreatedBy)
+			_ = client.NewModelService[models.Task]().ReplaceById(t.Id, *t)
+		}
+		return fmt.Errorf("failed to run task: %w", err)
+	}
+
+	return nil
+}
+
+func (svc *Service) reportStatus() {
+	defer svc.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			svc.Errorf("reportStatus panic recovered: %v", r)
+		}
+	}()
+
+	for {
 		select {
-		case <-ticker.C:
-			// update node status
+		case <-svc.ctx.Done():
+			svc.Infof("reportStatus stopped by context")
+			return
+		case <-svc.reportTicker.C:
+			// Update node status with error handling
 			if err := svc.updateNodeStatus(); err != nil {
 				svc.Errorf("failed to report status: %v", err)
 			}
@@ -134,6 +282,27 @@ func (svc *Service) GetCancelTimeout() (timeout time.Duration) {
 
 func (svc *Service) GetNodeConfigService() (cfgSvc interfaces.NodeConfigService) {
 	return svc.cfgSvc
+}
+
+func (svc *Service) getCurrentNodeMaxRunners() int {
+	n, err := svc.GetCurrentNode()
+	if err != nil {
+		svc.Errorf("failed to get current node for max runners: %v", err)
+		// Fallback to config default
+		return utils.GetNodeMaxRunners()
+	}
+
+	// If MaxRunners is 0, it means unlimited workers
+	if n.MaxRunners == 0 {
+		return -1 // Use -1 internally to represent unlimited
+	}
+
+	// If MaxRunners is negative (not set), use config default
+	if n.MaxRunners < 0 {
+		return utils.GetNodeMaxRunners()
+	}
+
+	return n.MaxRunners
 }
 
 func (svc *Service) GetCurrentNode() (n *models.Node, err error) {
@@ -222,35 +391,6 @@ func (svc *Service) getRunnerCount() (count int) {
 	return count
 }
 
-func (svc *Service) getRunner(taskId primitive.ObjectID) (r interfaces.TaskRunner, err error) {
-	svc.Debugf("get runner: taskId[%v]", taskId)
-	v, ok := svc.runners.Load(taskId)
-	if !ok {
-		err = fmt.Errorf("task[%s] not exists", taskId.Hex())
-		svc.Errorf("get runner error: %v", err)
-		return nil, err
-	}
-	switch v.(type) {
-	case interfaces.TaskRunner:
-		r = v.(interfaces.TaskRunner)
-	default:
-		err = fmt.Errorf("invalid type: %T", v)
-		svc.Errorf("get runner error: %v", err)
-		return nil, err
-	}
-	return r, nil
-}
-
-func (svc *Service) addRunner(taskId primitive.ObjectID, r interfaces.TaskRunner) {
-	svc.Debugf("add runner: taskId[%s]", taskId.Hex())
-	svc.runners.Store(taskId, r)
-}
-
-func (svc *Service) deleteRunner(taskId primitive.ObjectID) {
-	svc.Debugf("delete runner: taskId[%v]", taskId)
-	svc.runners.Delete(taskId)
-}
-
 func (svc *Service) updateNodeStatus() (err error) {
 	// current node
 	n, err := svc.GetCurrentNode()
@@ -258,8 +398,35 @@ func (svc *Service) updateNodeStatus() (err error) {
 		return err
 	}
 
+	// Check if max runners configuration has changed and update worker pool
+	currentMaxWorkers := n.MaxRunners
+	// Handle unlimited workers (0 means unlimited)
+	if currentMaxWorkers == 0 {
+		currentMaxWorkers = -1 // Use -1 internally to represent unlimited
+	} else if currentMaxWorkers < 0 {
+		currentMaxWorkers = utils.GetNodeMaxRunners() // Use config default if not set (negative)
+	}
+
+	if currentMaxWorkers != svc.maxWorkers {
+		if currentMaxWorkers == -1 {
+			svc.Infof("Node max runners changed from %d to unlimited, updating worker pool", svc.maxWorkers)
+		} else if svc.maxWorkers == -1 {
+			svc.Infof("Node max runners changed from unlimited to %d, updating worker pool", currentMaxWorkers)
+		} else {
+			svc.Infof("Node max runners changed from %d to %d, updating worker pool", svc.maxWorkers, currentMaxWorkers)
+		}
+		svc.maxWorkers = currentMaxWorkers
+		if svc.workerPool != nil {
+			svc.workerPool.UpdateMaxWorkers(currentMaxWorkers)
+		}
+	}
+
 	// set available runners
 	n.CurrentRunners = svc.getRunnerCount()
+
+	// Log goroutine count for leak monitoring
+	currentGoroutines := runtime.NumGoroutine()
+	svc.Debugf("Node status update - runners: %d, goroutines: %d", n.CurrentRunners, currentGoroutines)
 
 	// save node
 	n.SetUpdated(n.CreatedBy)
@@ -276,9 +443,14 @@ func (svc *Service) updateNodeStatus() (err error) {
 }
 
 func (svc *Service) fetchTask() (tid primitive.ObjectID, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), svc.fetchTimeout)
+	// Use service context with timeout for fetch operation
+	ctx, cancel := context.WithTimeout(svc.ctx, svc.fetchTimeout)
 	defer cancel()
-	res, err := svc.c.TaskClient.FetchTask(ctx, &grpc.TaskServiceFetchTaskRequest{
+	taskClient, err := svc.c.GetTaskClient()
+	if err != nil {
+		return primitive.NilObjectID, fmt.Errorf("failed to get task client: %v", err)
+	}
+	res, err := taskClient.FetchTask(ctx, &grpc.TaskServiceFetchTaskRequest{
 		NodeKey: svc.cfgSvc.GetNodeKey(),
 	})
 	if err != nil {
@@ -292,142 +464,85 @@ func (svc *Service) fetchTask() (tid primitive.ObjectID, err error) {
 	return tid, nil
 }
 
-func (svc *Service) runTask(taskId primitive.ObjectID) (err error) {
-	// attempt to get runner from pool
-	_, ok := svc.runners.Load(taskId)
-	if ok {
-		err = fmt.Errorf("task[%s] already exists", taskId.Hex())
-		svc.Errorf("run task error: %v", err)
-		return err
-	}
-
-	// create a new task runner
-	r, err := newTaskRunner(taskId, svc)
-	if err != nil {
-		err = fmt.Errorf("failed to create task runner: %v", err)
-		svc.Errorf("run task error: %v", err)
-		return err
-	}
-
-	// add runner to pool
-	svc.addRunner(taskId, r)
-
-	// create a goroutine to run task
+func (svc *Service) startStuckTaskCleanup() {
+	svc.wg.Add(1) // Track this goroutine in the WaitGroup
 	go func() {
-		// get subscription stream
-		stopCh := make(chan struct{})
-		stream, err := svc.subscribeTask(r.GetTaskId())
-		if err == nil {
-			// create a goroutine to handle stream messages
-			go svc.handleStreamMessages(r.GetTaskId(), stream, stopCh)
-		} else {
-			svc.Errorf("failed to subscribe task[%s]: %v", r.GetTaskId().Hex(), err)
-			svc.Warnf("task[%s] will not be able to receive stream messages", r.GetTaskId().Hex())
-		}
+		defer svc.wg.Done() // Ensure WaitGroup is decremented
+		defer func() {
+			if r := recover(); r != nil {
+				svc.Errorf("startStuckTaskCleanup panic recovered: %v", r)
+			}
+		}()
 
-		// run task process (blocking) error or finish after task runner ends
-		if err := r.Run(); err != nil {
-			switch {
-			case errors.Is(err, constants.ErrTaskError):
-				svc.Errorf("task[%s] finished with error: %v", r.GetTaskId().Hex(), err)
-			case errors.Is(err, constants.ErrTaskCancelled):
-				svc.Errorf("task[%s] cancelled", r.GetTaskId().Hex())
-			default:
-				svc.Errorf("task[%s] finished with unknown error: %v", r.GetTaskId().Hex(), err)
+		ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-svc.ctx.Done():
+				svc.Debugf("stuck task cleanup routine shutting down")
+				return
+			case <-ticker.C:
+				svc.checkAndCleanupStuckTasks()
 			}
 		}
-		svc.Infof("task[%s] finished", r.GetTaskId().Hex())
+	}()
+}
 
-		// send stopCh signal to stream message handler
-		stopCh <- struct{}{}
-
-		// delete runner from pool
-		svc.deleteRunner(r.GetTaskId())
+// checkAndCleanupStuckTasks checks for tasks that have been trying to cancel for too long
+func (svc *Service) checkAndCleanupStuckTasks() {
+	defer func() {
+		if r := recover(); r != nil {
+			svc.Errorf("panic in stuck task cleanup: %v", r)
+		}
 	}()
 
-	return nil
-}
+	var stuckTasks []primitive.ObjectID
 
-func (svc *Service) subscribeTask(taskId primitive.ObjectID) (stream grpc.TaskService_SubscribeClient, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req := &grpc.TaskServiceSubscribeRequest{
-		TaskId: taskId.Hex(),
-	}
-	stream, err = svc.c.TaskClient.Subscribe(ctx, req)
-	if err != nil {
-		svc.Errorf("failed to subscribe task[%s]: %v", taskId.Hex(), err)
-		return nil, err
-	}
-	return stream, nil
-}
+	// Check all running tasks
+	svc.runners.Range(func(key, value interface{}) bool {
+		taskId, ok := key.(primitive.ObjectID)
+		if !ok {
+			return true
+		}
 
-func (svc *Service) handleStreamMessages(taskId primitive.ObjectID, stream grpc.TaskService_SubscribeClient, stopCh chan struct{}) {
-	for {
-		select {
-		case <-stopCh:
-			err := stream.CloseSend()
-			if err != nil {
-				svc.Errorf("task[%s] failed to close stream: %v", taskId.Hex(), err)
-				return
-			}
-			return
-		default:
-			msg, err := stream.Recv()
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					svc.Infof("task[%s] received EOF, stream closed", taskId.Hex())
-					return
-				}
-				svc.Errorf("task[%s] stream error: %v", taskId.Hex(), err)
-				continue
-			}
-			switch msg.Code {
-			case grpc.TaskServiceSubscribeCode_CANCEL:
-				svc.Infof("task[%s] received cancel signal", taskId.Hex())
-				go svc.handleCancel(msg, taskId)
+		// Get task from database to check its state
+		t, err := svc.GetTaskById(taskId)
+		if err != nil {
+			svc.Errorf("failed to get task[%s] during stuck cleanup: %v", taskId.Hex(), err)
+			return true
+		}
+
+		// Check if task has been in cancelling state too long (15+ minutes)
+		if t.Status == constants.TaskStatusCancelled && time.Since(t.UpdatedAt) > 15*time.Minute {
+			svc.Warnf("detected stuck cancelled task[%s], will force cleanup", taskId.Hex())
+			stuckTasks = append(stuckTasks, taskId)
+		}
+
+		return true
+	})
+
+	// Force cleanup stuck tasks
+	for _, taskId := range stuckTasks {
+		svc.Infof("force cleaning up stuck task[%s]", taskId.Hex())
+
+		// Remove from runners map
+		svc.runners.Delete(taskId)
+
+		// Update task status to indicate it was force cleaned
+		t, err := svc.GetTaskById(taskId)
+		if err == nil {
+			t.Status = constants.TaskStatusCancelled
+			t.Error = "Task was stuck in cancelling state and was force cleaned up"
+			if updateErr := svc.UpdateTask(t); updateErr != nil {
+				svc.Errorf("failed to update stuck task[%s] status: %v", taskId.Hex(), updateErr)
 			}
 		}
 	}
-}
 
-func (svc *Service) handleCancel(msg *grpc.TaskServiceSubscribeResponse, taskId primitive.ObjectID) {
-	// validate task id
-	if msg.TaskId != taskId.Hex() {
-		svc.Errorf("task[%s] received cancel signal for another task[%s]", taskId.Hex(), msg.TaskId)
-		return
+	if len(stuckTasks) > 0 {
+		svc.Infof("cleaned up %d stuck tasks", len(stuckTasks))
 	}
-
-	// cancel task
-	err := svc.cancelTask(taskId, msg.Force)
-	if err != nil {
-		svc.Errorf("task[%s] failed to cancel: %v", taskId.Hex(), err)
-		return
-	}
-	svc.Infof("task[%s] cancelled", taskId.Hex())
-
-	// set task status as "cancelled"
-	t, err := svc.GetTaskById(taskId)
-	if err != nil {
-		svc.Errorf("task[%s] failed to get task: %v", taskId.Hex(), err)
-		return
-	}
-	t.Status = constants.TaskStatusCancelled
-	err = svc.UpdateTask(t)
-	if err != nil {
-		svc.Errorf("task[%s] failed to update task: %v", taskId.Hex(), err)
-	}
-}
-
-func (svc *Service) cancelTask(taskId primitive.ObjectID, force bool) (err error) {
-	r, err := svc.getRunner(taskId)
-	if err != nil {
-		return err
-	}
-	if err := r.Cancel(force); err != nil {
-		return err
-	}
-	return nil
 }
 
 func newTaskHandlerService() *Service {
@@ -437,16 +552,23 @@ func newTaskHandlerService() *Service {
 		fetchTimeout:   15 * time.Second,
 		reportInterval: 5 * time.Second,
 		cancelTimeout:  60 * time.Second,
-		mu:             sync.Mutex{},
+		maxWorkers:     utils.GetNodeMaxRunners(),
+		mu:             sync.RWMutex{},
 		runners:        sync.Map{},
 		Logger:         utils.NewLogger("TaskHandlerService"),
 	}
+
+	// Initialize context for graceful shutdown
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
 
 	// dependency injection
 	svc.cfgSvc = nodeconfig.GetNodeConfigService()
 
 	// grpc client
 	svc.c = grpcclient.GetGrpcClient()
+
+	// initialize stream manager
+	svc.streamManager = NewStreamManager(svc)
 
 	return svc
 }

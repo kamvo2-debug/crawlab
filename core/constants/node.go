@@ -1,6 +1,6 @@
 package constants
 
 const (
-	NodeStatusOnline  = "on"
-	NodeStatusOffline = "off"
+	NodeStatusOnline  = "online"
+	NodeStatusOffline = "offline"
 )

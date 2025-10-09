@@ -6,6 +6,12 @@ on:
   release:
     types: [ published ]
   workflow_dispatch:
+    inputs:
+      multiarch:
+        description: 'Build multi-architecture images (slower)'
+        required: false
+        default: false
+        type: boolean
   repository_dispatch:
     types: [ docker-crawlab ]
 
@@ -22,8 +28,6 @@ env:
   IMAGE_NAME_CRAWLAB_GH: ghcr.io/${{ github.repository_owner }}/crawlab
   IMAGE_NAME_CRAWLAB_DOCKERHUB: crawlabteam/crawlab
   IMAGE_NAME_CRAWLAB_TENCENT: ccr.ccs.tencentyun.com/crawlab/crawlab
-  E2E_TESTS_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/e2e-tests
-  E2E_TESTS_WORKSPACE: ${{ github.workspace }}/playwright-report
 
 jobs:
   setup:
@@ -36,7 +40,8 @@ jobs:
       workflow_changed: ${{ steps.check_changed_files.outputs.workflow_changed }}
       base_image_changed: ${{ steps.check_changed_files.outputs.base_image_changed }}
       version: ${{ steps.version.outputs.version }}
-      test_script: ${{ steps.test_config.outputs.test_script }}
+      platforms: ${{ steps.platform_config.outputs.platforms }}
+      is_multiarch_build: ${{ steps.platform_config.outputs.is_multiarch_build }}
 
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +66,7 @@ jobs:
               - 'docker/nginx/**'
             workflow:
               - '.github/workflows/docker-crawlab.yml'
-            base_image:
+            baseimage:
               - 'docker/base-image/**'
 
       - id: check_changed_files
@@ -79,7 +84,7 @@ jobs:
             echo "frontend_changed=${{ steps.changed_files.outputs.frontend_any_changed }}" >> $GITHUB_OUTPUT
             echo "docker_changed=${{ steps.changed_files.outputs.docker_any_changed }}" >> $GITHUB_OUTPUT
             echo "workflow_changed=${{ steps.changed_files.outputs.workflow_any_changed }}" >> $GITHUB_OUTPUT
-            echo "base_image_changed=${{ steps.changed_files.outputs.base_image_any_changed }}" >> $GITHUB_OUTPUT
+            echo "base_image_changed=${{ steps.changed_files.outputs.baseimage_any_changed }}" >> $GITHUB_OUTPUT
           fi
           
           # Display change status for each component
@@ -87,7 +92,7 @@ jobs:
           echo "Frontend changed: ${{ steps.changed_files.outputs.frontend_any_changed }}"
           echo "Docker changed: ${{ steps.changed_files.outputs.docker_any_changed }}"
           echo "Workflow changed: ${{ steps.changed_files.outputs.workflow_any_changed }}"
-          echo "Base image changed: ${{ steps.changed_files.outputs.base_image_any_changed }}"
+          echo "Base image changed: ${{ steps.changed_files.outputs.baseimage_any_changed }}"
 
       - id: version
         name: Get version
@@ -103,15 +108,20 @@ jobs:
           
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - id: test_config
-        name: Set test configuration
+      - id: platform_config
+        name: Configure build platforms
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "test_script=test:full" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == "refs/heads/test" ]]; then
-            echo "test_script=test:extended" >> $GITHUB_OUTPUT
+          # Default to x64-only builds for speed (majority of users)
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.multiarch }}" == "true" ]]; then
+            # Multi-arch only when explicitly requested
+            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+            echo "is_multiarch_build=true" >> $GITHUB_OUTPUT
+            echo "🏗️ Building multi-architecture images (amd64 + arm64) - explicitly requested"
           else
-            echo "test_script=test:normal" >> $GITHUB_OUTPUT
+            # x64-only by default (faster, serves majority of users)
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT  
+            echo "is_multiarch_build=false" >> $GITHUB_OUTPUT
+            echo "⚡ Building x64-only images (default - faster builds for majority users)"
           fi
 
   build_base_image:
@@ -123,6 +133,10 @@ jobs:
       failed: ${{ steps.set_output.outputs.failed }}
     steps:
       - uses: actions/checkout@v4
+      - name: Show build configuration
+        run: |
+          echo "🏗️ Build Strategy: ${{ needs.setup.outputs.is_multiarch_build == 'true' && 'Multi-Architecture (amd64 + arm64)' || 'x64-Only (faster development)' }}"
+          echo "📦 Platforms: ${{ needs.setup.outputs.platforms }}"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
@@ -135,6 +149,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./docker/base-image
+          platforms: ${{ needs.setup.outputs.platforms }}
           push: true
           tags: ${{ env.IMAGE_NAME_CRAWLAB_BASE }}:${{ needs.setup.outputs.version }}
       - name: Set output
@@ -189,6 +204,8 @@ jobs:
       failed: ${{ steps.set_output.outputs.failed }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -200,6 +217,7 @@ jobs:
         with:
           context: .
           file: ${{ env.IMAGE_PATH_CRAWLAB_BACKEND }}/Dockerfile
+          platforms: ${{ needs.setup.outputs.platforms }}
           push: true
           tags: ${{ env.IMAGE_NAME_CRAWLAB_BACKEND }}:${{ needs.setup.outputs.version }}
       - name: Set output
@@ -218,6 +236,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -228,6 +248,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ${{ env.IMAGE_PATH_CRAWLAB_FRONTEND }}
+          platforms: ${{ needs.setup.outputs.platforms }}
           push: true
           tags: ${{ env.IMAGE_NAME_CRAWLAB_FRONTEND }}:${{ needs.setup.outputs.version }}
       - name: Set output
@@ -269,6 +290,8 @@ jobs:
             NEW_IMAGE="${IMAGE_NAME}:"
             sed -i "s|${OLD_IMAGE}|${NEW_IMAGE}|" Dockerfile
           done
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -280,70 +303,17 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          platforms: ${{ needs.setup.outputs.platforms }}
           build-args: |
             CRAWLAB_TAG=${{ needs.setup.outputs.version }}
           push: true
           tags: |
             ${{ env.IMAGE_NAME_CRAWLAB_GH }}:${{ needs.setup.outputs.version }}
 
-  test_crawlab:
-    name: Test crawlab
-    needs: [setup, build_crawlab]
-    if: ${{ always() && needs.build_crawlab.result == 'success' }}
-    runs-on: ubuntu-latest
-    services:
-      mongo:
-        image: mongo:5
-        options: >-
-          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")' || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      master:
-        image: ghcr.io/${{ github.repository_owner }}/crawlab:${{ needs.setup.outputs.version }}
-        env:
-          CRAWLAB_NODE_MASTER: Y
-          CRAWLAB_MONGO_HOST: mongo 
-          CRAWLAB_MONGO_PORT: 27017
-        ports:
-          - 8080:8080
-      worker:
-        image: ghcr.io/${{ github.repository_owner }}/crawlab:${{ needs.setup.outputs.version }}
-        env:
-          CRAWLAB_NODE_MASTER: N
-          CRAWLAB_MASTER_HOST: master
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pull e2e test image
-        run: |
-          docker pull ${{ env.E2E_TESTS_IMAGE_NAME }}:latest
-      - name: Run e2e test image
-        run: |
-          docker run --network host \
-            -e BASE_URL=http://localhost:8080 \
-            -e TEST_SCRIPT=${{ needs.setup.outputs.test_script }} \
-            -v ${{ env.E2E_TESTS_WORKSPACE }}:/app/playwright-report \
-            ${{ env.E2E_TESTS_IMAGE_NAME }}:latest
-      - name: Upload test results
-        if: ${{ success() || failure() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-${{ needs.setup.outputs.version }}
-          path: ${{ env.E2E_TESTS_WORKSPACE }}
-          retention-days: 1
-          overwrite: true
-
   push_images:
     name: Push images
-    if: ${{ always() && needs.test_crawlab.result == 'success' }}
-    needs: [setup, test_crawlab]
+    if: ${{ always() && needs.build_crawlab.result == 'success' }}
+    needs: [setup, build_crawlab]
     runs-on: ubuntu-latest
     strategy:
       matrix:

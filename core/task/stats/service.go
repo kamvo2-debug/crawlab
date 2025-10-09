@@ -112,7 +112,7 @@ func (svc *Service) getDatabaseServiceItem(taskId primitive.ObjectID) (item *dat
 	var dbSvc interfaces2.DatabaseService
 	if utils.IsPro() {
 		if dbRegSvc := database.GetDatabaseRegistryService(); dbRegSvc != nil {
-			dbSvc, err = dbRegSvc.GetDatabaseService(s.DataSourceId)
+			dbSvc, err = dbRegSvc.GetDatabaseService(s.DatabaseId)
 			if err != nil {
 				return nil, err
 			}
@@ -123,7 +123,7 @@ func (svc *Service) getDatabaseServiceItem(taskId primitive.ObjectID) (item *dat
 	item = &databaseServiceItem{
 		taskId:    taskId,
 		spiderId:  s.Id,
-		dbId:      s.DataSourceId,
+		dbId:      s.DatabaseId,
 		dbSvc:     dbSvc,
 		tableName: s.ColName,
 		time:      time.Now(),

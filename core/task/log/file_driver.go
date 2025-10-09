@@ -4,9 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"github.com/crawlab-team/crawlab/core/interfaces"
-	"github.com/crawlab-team/crawlab/core/utils"
-	"github.com/spf13/viper"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +11,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/crawlab-team/crawlab/core/interfaces"
+	"github.com/crawlab-team/crawlab/core/utils"
+	"github.com/spf13/viper"
 )
 
 type FileLogDriver struct {
@@ -72,7 +73,7 @@ func (d *FileLogDriver) WriteLines(id string, lines []string) (err error) {
 	return nil
 }
 
-func (d *FileLogDriver) Find(id string, pattern string, skip int, limit int) (lines []string, err error) {
+func (d *FileLogDriver) Find(id string, pattern string, skip int, limit int, tail bool) (lines []string, err error) {
 	if pattern != "" {
 		err = fmt.Errorf("find with pattern not implemented")
 		d.Errorf("%v", err)
@@ -89,27 +90,89 @@ func (d *FileLogDriver) Find(id string, pattern string, skip int, limit int) (li
 	}
 	defer f.Close()
 
+	// Get total line count
+	totalLines, err := d.Count(id, "")
+	if err != nil {
+		d.Errorf("failed to count lines: %v", err)
+		return nil, err
+	}
+
+	// Calculate effective skip and limit
+	effectiveSkip := skip
+	effectiveLimit := limit
+
+	if tail {
+		// In tail mode, we count from the end
+		if skip >= totalLines {
+			// Skip beyond file size
+			return []string{}, nil
+		}
+
+		if limit <= 0 {
+			// When limit is 0 in tail mode, return all lines except the last 'skip' lines
+			// This means we start from the beginning and read until (totalLines - skip)
+			effectiveSkip = 0
+			effectiveLimit = totalLines - skip
+		} else {
+			// Normal tail behavior: skip from end and read N lines
+			startPosition := totalLines - skip - limit
+			if startPosition < 0 {
+				// If we would start before the beginning of the file, adjust
+				effectiveSkip = 0
+				effectiveLimit = totalLines - skip
+				if effectiveLimit < 0 {
+					effectiveLimit = 0
+				}
+			} else {
+				effectiveSkip = startPosition
+				effectiveLimit = limit
+			}
+		}
+	} else {
+		// In normal mode, just ensure we don't read past EOF
+		if effectiveSkip >= totalLines {
+			return []string{}, nil
+		}
+		if limit <= 0 {
+			effectiveLimit = totalLines - effectiveSkip
+		} else if effectiveSkip+effectiveLimit > totalLines {
+			effectiveLimit = totalLines - effectiveSkip
+		}
+	}
+
+	if effectiveLimit <= 0 {
+		return []string{}, nil
+	}
+
 	sc := bufio.NewReaderSize(f, 1024*1024*10)
 
-	i := -1
-	for {
+	// Skip lines
+	for i := 0; i < effectiveSkip; i++ {
+		_, err := sc.ReadString(byte('\n'))
+		if err != nil {
+			if err == io.EOF {
+				return lines, nil
+			}
+			d.Errorf("failed to read line: %v", err)
+			return nil, err
+		}
+	}
+
+	// Read required lines
+	for i := 0; i < effectiveLimit; i++ {
 		line, err := sc.ReadString(byte('\n'))
 		if err != nil {
+			if err != io.EOF {
+				d.Errorf("failed to read line: %v", err)
+				return nil, err
+			}
+			// Handle the last line if it doesn't end with newline
+			if len(line) > 0 {
+				lines = append(lines, strings.TrimSuffix(line, "\n"))
+			}
 			break
 		}
-		line = strings.TrimSuffix(line, "\n")
-
-		i++
-
-		if i < skip {
-			continue
-		}
-
-		if i >= skip+limit {
-			break
-		}
-
-		lines = append(lines, line)
+		lines = append(lines, strings.TrimSuffix(line, "\n"))
 	}
 
 	return lines, nil

@@ -9,84 +9,70 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-func GetSetting(c *gin.Context) {
-	// key
-	key := c.Param("key")
-
-	// setting
-	s, err := service.NewModelService[models.Setting]().GetOne(bson.M{"key": key}, nil)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			HandleSuccess(c)
-			return
-		}
-		HandleErrorInternalServerError(c, err)
-		return
-	}
-
-	HandleSuccessWithData(c, s)
+type GetSettingParams struct {
+	Key string `path:"key" description:"Setting key" validate:"required"`
 }
 
-func PostSetting(c *gin.Context) {
-	// key
-	key := c.Param("key")
-
-	// settings
-	var s models.Setting
-	if err := c.ShouldBindJSON(&s); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+func GetSetting(_ *gin.Context, params *GetSettingParams) (response *Response[models.Setting], err error) {
+	// setting
+	s, err := service.NewModelService[models.Setting]().GetOne(bson.M{"key": params.Key}, nil)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return GetDataResponse(models.Setting{})
+		}
+		return GetErrorResponse[models.Setting](err)
 	}
 
+	return GetDataResponse(*s)
+}
+
+type PostSettingParams struct {
+	Key  string         `path:"key" description:"Setting key" validate:"required"`
+	Data models.Setting `json:"data" description:"The data to create" validate:"required"`
+}
+
+func PostSetting(c *gin.Context, params *PostSettingParams) (response *Response[models.Setting], err error) {
+	s := params.Data
 	if s.Key == "" {
-		s.Key = key
+		s.Key = params.Key
 	}
 
 	u := GetUserFromContext(c)
-
 	s.SetCreated(u.Id)
 	s.SetUpdated(u.Id)
 
 	id, err := service.NewModelService[models.Setting]().InsertOne(s)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Setting](err)
 	}
 	s.Id = id
 
-	HandleSuccessWithData(c, s)
+	return GetDataResponse(s)
 }
 
-func PutSetting(c *gin.Context) {
-	// key
-	key := c.Param("key")
+type PutSettingParams struct {
+	Key  string         `path:"key" description:"Setting key" validate:"required"`
+	Data models.Setting `json:"data" description:"The data to update" validate:"required"`
+}
 
-	// settings
-	var s models.Setting
-	if err := c.ShouldBindJSON(&s); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
-	}
-
+func PutSetting(c *gin.Context, params *PutSettingParams) (response *Response[models.Setting], err error) {
 	modelSvc := service.NewModelService[models.Setting]()
 
 	// setting
-	_s, err := modelSvc.GetOne(bson.M{"key": key}, nil)
+	existingSetting, err := modelSvc.GetOne(bson.M{"key": params.Key}, nil)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Setting](err)
 	}
 
 	u := GetUserFromContext(c)
 
 	// save
-	_s.Value = s.Value
-	_s.SetUpdated(u.Id)
-	err = modelSvc.ReplaceOne(bson.M{"key": key}, *_s)
+	existingSetting.Value = params.Data.Value
+	existingSetting.SetUpdated(u.Id)
+	err = modelSvc.ReplaceOne(bson.M{"key": params.Key}, *existingSetting)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Setting](err)
 	}
 
-	HandleSuccess(c)
+	return GetDataResponse(*existingSetting)
 }

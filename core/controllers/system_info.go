@@ -6,10 +6,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func GetSystemInfo(c *gin.Context) {
-	info := &entity.SystemInfo{
+func GetSystemInfo(_ *gin.Context) (response *Response[entity.SystemInfo], err error) {
+	info := entity.SystemInfo{
 		Edition: utils.GetEdition(),
 		Version: utils.GetVersion(),
 	}
-	HandleSuccessWithData(c, info)
+	return GetDataResponse(info)
 }

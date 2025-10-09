@@ -1,7 +1,7 @@
 package models
 
 type TestModel struct {
-	any                  `collection:"testmodels"`
-	BaseModel[TestModel] `bson:",inline"`
-	Name                 string `json:"name" bson:"name"`
+	any       `collection:"testmodels"`
+	BaseModel `bson:",inline"`
+	Name      string `json:"name" bson:"name"`
 }

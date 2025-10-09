@@ -1,10 +1,10 @@
 package controllers
 
 import (
-	"errors"
-	"fmt"
-	"github.com/crawlab-team/crawlab/core/mongo"
 	"regexp"
+
+	"github.com/crawlab-team/crawlab/core/mongo"
+	"github.com/juju/errors"
 
 	"github.com/crawlab-team/crawlab/core/models/models"
 	"github.com/crawlab-team/crawlab/core/models/service"
@@ -15,34 +15,33 @@ import (
 	mongo2 "go.mongodb.org/mongo-driver/mongo"
 )
 
-func GetUserById(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+func GetUserById(_ *gin.Context, params *GetByIdParams) (response *Response[models.User], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return GetErrorResponse[models.User](errors.BadRequestf("invalid user id: %v", err))
 	}
-	getUserById(id, c)
+	return getUserById(id)
 }
 
-func GetUserList(c *gin.Context) {
-	// params
-	pagination := MustGetPagination(c)
-	query := MustGetFilterQuery(c)
-	sort := MustGetSortOption(c)
+func GetUserList(_ *gin.Context, params *GetListParams) (response *ListResponse[models.User], err error) {
+	query := ConvertToBsonMFromListParams(params)
 
-	// get users
+	sort, err := GetSortOptionFromString(params.Sort)
+	if err != nil {
+		return GetErrorListResponse[models.User](err)
+	}
+
 	users, err := service.NewModelService[models.User]().GetMany(query, &mongo.FindOptions{
 		Sort:  sort,
-		Skip:  pagination.Size * (pagination.Page - 1),
-		Limit: pagination.Size,
+		Skip:  params.Size * (params.Page - 1),
+		Limit: params.Size,
 	})
 	if err != nil {
 		if errors.Is(err, mongo2.ErrNoDocuments) {
-			HandleSuccessWithListData(c, nil, 0)
+			return GetListResponse[models.User](nil, 0)
 		} else {
-			HandleErrorInternalServerError(c, err)
+			return GetErrorListResponse[models.User](err)
 		}
-		return
 	}
 
 	// get roles
@@ -58,8 +57,7 @@ func GetUserList(c *gin.Context) {
 				"_id": bson.M{"$in": roleIds},
 			}, nil)
 			if err != nil {
-				HandleErrorInternalServerError(c, err)
-				return
+				return GetErrorListResponse[models.User](err)
 			}
 			rolesMap := make(map[primitive.ObjectID]models.Role)
 			for _, role := range roles {
@@ -80,149 +78,131 @@ func GetUserList(c *gin.Context) {
 	// total count
 	total, err := service.NewModelService[models.User]().Count(query)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorListResponse[models.User](err)
 	}
 
 	// response
-	HandleSuccessWithListData(c, users, total)
+	return GetListResponse(users, total)
 }
 
-func PostUser(c *gin.Context) {
-	var payload struct {
-		Username string             `json:"username"`
-		Password string             `json:"password"`
-		Role     string             `json:"role"`
-		RoleId   primitive.ObjectID `json:"role_id"`
-		Email    string             `json:"email"`
-	}
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
-	}
+type PostUserParams struct {
+	Data struct {
+		Username string `json:"username" description:"Username" validate:"required"`
+		Password string `json:"password" description:"Password" validate:"required"`
+		Role     string `json:"role" description:"Role"`
+		RoleId   string `json:"role_id" description:"Role ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+		Email    string `json:"email" description:"Email"`
+	} `json:"data" validate:"required"`
+}
 
+func PostUser(c *gin.Context, params *PostUserParams) (response *Response[models.User], err error) {
 	// Validate email format
-	if payload.Email != "" {
+	if params.Data.Email != "" {
 		emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
-		if !emailRegex.MatchString(payload.Email) {
-			HandleErrorBadRequest(c, fmt.Errorf("invalid email format"))
-			return
+		if !emailRegex.MatchString(params.Data.Email) {
+			return GetErrorResponse[models.User](errors.BadRequestf("invalid email format"))
 		}
 	}
 
-	if !payload.RoleId.IsZero() {
-		_, err := service.NewModelService[models.Role]().GetById(payload.RoleId)
+	var roleId primitive.ObjectID
+	if params.Data.RoleId != "" {
+		roleId, err = primitive.ObjectIDFromHex(params.Data.RoleId)
 		if err != nil {
-			HandleErrorBadRequest(c, err)
-			return
+			return GetErrorResponse[models.User](errors.BadRequestf("invalid role id: %v", err))
+		}
+		_, err = service.NewModelService[models.Role]().GetById(roleId)
+		if err != nil {
+			return GetErrorResponse[models.User](errors.BadRequestf("role not found: %v", err))
 		}
 	}
 	u := GetUserFromContext(c)
 	model := models.User{
-		Username: payload.Username,
-		Password: utils.EncryptMd5(payload.Password),
-		Role:     payload.Role,
-		RoleId:   payload.RoleId,
-		Email:    payload.Email,
+		Username: params.Data.Username,
+		Password: utils.EncryptMd5(params.Data.Password),
+		Role:     params.Data.Role,
+		RoleId:   roleId,
+		Email:    params.Data.Email,
 	}
 	model.SetCreated(u.Id)
 	model.SetUpdated(u.Id)
 	id, err := service.NewModelService[models.User]().InsertOne(model)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 
 	result, err := service.NewModelService[models.User]().GetById(id)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 
-	HandleSuccessWithData(c, result)
+	return GetDataResponse(*result)
 }
 
-func PutUserById(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+func PutUserById(c *gin.Context, params *PutByIdParams[models.User]) (response *Response[models.User], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return GetErrorResponse[models.User](errors.BadRequestf("invalid user id: %v", err))
 	}
-	putUser(id, c)
+	return putUser(id, GetUserFromContext(c).Id, params.Data)
 }
 
-func PostUserChangePassword(c *gin.Context) {
-	// get id
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+type PostUserChangePasswordParams struct {
+	Id       string `path:"id" description:"User ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Password string `json:"password" description:"Password" validate:"required"`
+}
+
+func PostUserChangePassword(c *gin.Context, params *PostUserChangePasswordParams) (response *Response[models.User], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return GetErrorResponse[models.User](errors.BadRequestf("invalid user id: %v", err))
 	}
-
-	postUserChangePassword(id, c)
+	return postUserChangePassword(id, GetUserFromContext(c).Id, params.Password)
 }
 
-func DeleteUserById(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+func DeleteUserById(_ *gin.Context, params *DeleteByIdParams) (response *Response[models.User], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return GetErrorResponse[models.User](errors.BadRequestf("invalid user id: %v", err))
 	}
 
 	user, err := service.NewModelService[models.User]().GetById(id)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 	if user.RootAdmin {
-		HandleErrorForbidden(c, errors.New("root admin cannot be deleted"))
-		return
+		return GetErrorResponse[models.User](errors.Forbiddenf("root admin cannot be deleted"))
 	}
 
 	if err := service.NewModelService[models.User]().DeleteById(id); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 
-	HandleSuccess(c)
+	return GetDataResponse(models.User{})
 }
 
-func DeleteUserList(c *gin.Context) {
-	type Payload struct {
-		Ids []string `json:"ids"`
-	}
-
-	var payload Payload
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
-	}
-
+func DeleteUserList(_ *gin.Context, params *DeleteListParams) (response *Response[models.User], err error) {
 	// Convert string IDs to ObjectIDs
 	var ids []primitive.ObjectID
-	for _, id := range payload.Ids {
+	for _, id := range params.Ids {
 		objectId, err := primitive.ObjectIDFromHex(id)
 		if err != nil {
-			HandleErrorBadRequest(c, err)
-			return
+			return GetErrorResponse[models.User](errors.BadRequestf("invalid user id: %v", err))
 		}
 		ids = append(ids, objectId)
 	}
 
 	// Check if root admin is in the list
-	_, err := service.NewModelService[models.User]().GetOne(bson.M{
+	_, err = service.NewModelService[models.User]().GetOne(bson.M{
 		"_id": bson.M{
 			"$in": ids,
 		},
 		"root_admin": true,
 	}, nil)
 	if err == nil {
-		HandleErrorForbidden(c, errors.New("root admin cannot be deleted"))
-		return
+		return GetErrorResponse[models.User](errors.Forbiddenf("root admin cannot be deleted"))
 	}
 	if !errors.Is(err, mongo2.ErrNoDocuments) {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 
 	// Delete users
@@ -231,34 +211,43 @@ func DeleteUserList(c *gin.Context) {
 			"$in": ids,
 		},
 	}); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 
-	HandleSuccess(c)
+	return GetDataResponse(models.User{})
 }
 
-func GetUserMe(c *gin.Context) {
+func GetUserMe(c *gin.Context) (response *Response[models.User], err error) {
 	u := GetUserFromContext(c)
-	getUserById(u.Id, c)
+	return getUserByIdWithRoutes(u.Id)
 }
 
-func PutUserMe(c *gin.Context) {
+type PutUserMeParams struct {
+	Data models.User `json:"data"`
+}
+
+func PutUserMe(c *gin.Context, params *PutUserMeParams) (response *Response[models.User], err error) {
 	u := GetUserFromContext(c)
-	putUser(u.Id, c)
+	return putUser(u.Id, u.Id, params.Data)
 }
 
-func PostUserMeChangePassword(c *gin.Context) {
+type PostUserMeChangePasswordParams struct {
+	Password string `json:"password" description:"Password" validate:"required"`
+}
+
+func PostUserMeChangePassword(c *gin.Context, params *PostUserMeChangePasswordParams) (response *Response[models.User], err error) {
 	u := GetUserFromContext(c)
-	postUserChangePassword(u.Id, c)
+	return postUserChangePassword(u.Id, u.Id, params.Password)
 }
 
-func getUserById(userId primitive.ObjectID, c *gin.Context) {
+func getUserById(userId primitive.ObjectID) (response *Response[models.User], err error) {
 	// get user
 	user, err := service.NewModelService[models.User]().GetById(userId)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		if errors.Is(err, mongo2.ErrNoDocuments) {
+			return GetErrorResponse[models.User](errors.BadRequestf("user not found: %v", err))
+		}
+		return GetErrorResponse[models.User](err)
 	}
 
 	// get role
@@ -266,33 +255,58 @@ func getUserById(userId primitive.ObjectID, c *gin.Context) {
 		if !user.RoleId.IsZero() {
 			role, err := service.NewModelService[models.Role]().GetById(user.RoleId)
 			if err != nil {
-				HandleErrorInternalServerError(c, err)
-				return
+				return GetErrorResponse[models.User](errors.BadRequestf("role not found: %v", err))
 			}
 			user.Role = role.Name
 			user.RootAdminRole = role.RootAdmin
 		}
 	}
 
-	HandleSuccessWithData(c, user)
+	return GetDataResponse(*user)
 }
 
-func putUser(userId primitive.ObjectID, c *gin.Context) {
-	// get payload
-	var user models.User
-	if err := c.ShouldBindJSON(&user); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+func getUserByIdWithRoutes(userId primitive.ObjectID) (response *Response[models.User], err error) {
+	if !utils.IsPro() {
+		return getUserById(userId)
 	}
 
+	// get user
+	user, err := service.NewModelService[models.User]().GetById(userId)
+	if err != nil {
+		if errors.Is(err, mongo2.ErrNoDocuments) {
+			return GetErrorResponse[models.User](errors.BadRequestf("user not found: %v", err))
+		}
+		return GetErrorResponse[models.User](err)
+	}
+
+	// get role
+	if !user.RoleId.IsZero() {
+		role, err := service.NewModelService[models.Role]().GetById(user.RoleId)
+		if err != nil {
+			if errors.Is(err, mongo2.ErrNoDocuments) {
+				return GetErrorResponse[models.User](errors.BadRequestf("role not found: %v", err))
+			}
+			return GetErrorResponse[models.User](err)
+		}
+		user.Role = role.Name
+		user.RootAdminRole = role.RootAdmin
+		user.Routes = role.Routes
+	}
+
+	return GetDataResponse(*user)
+}
+
+func putUser(userId, by primitive.ObjectID, user models.User) (response *Response[models.User], err error) {
 	// model service
 	modelSvc := service.NewModelService[models.User]()
 
 	// update user
 	userDb, err := modelSvc.GetById(userId)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		if errors.Is(err, mongo2.ErrNoDocuments) {
+			return GetErrorResponse[models.User](errors.BadRequestf("user not found: %v", err))
+		}
+		return GetErrorResponse[models.User](err)
 	}
 
 	// if root admin, disallow changing username and role
@@ -304,53 +318,34 @@ func putUser(userId primitive.ObjectID, c *gin.Context) {
 	// disallow changing password
 	user.Password = userDb.Password
 
-	// current user
-	u := GetUserFromContext(c)
-
 	// update user
-	user.SetUpdated(u.Id)
+	user.SetUpdated(by)
 	if user.Id.IsZero() {
 		user.Id = userId
 	}
 	if err := modelSvc.ReplaceById(userId, user); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 
 	// handle success
-	HandleSuccess(c)
+	return GetDataResponse(user)
 }
 
-func postUserChangePassword(userId primitive.ObjectID, c *gin.Context) {
-	// get payload
-	var payload struct {
-		Password string `json:"password"`
+func postUserChangePassword(userId, by primitive.ObjectID, password string) (response *Response[models.User], err error) {
+	if len(password) < 5 {
+		return GetErrorResponse[models.User](errors.BadRequestf("password must be at least 5 characters"))
 	}
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
-	}
-	if len(payload.Password) < 5 {
-		HandleErrorBadRequest(c, errors.New("password must be at least 5 characters"))
-		return
-	}
-
-	// current user
-	u := GetUserFromContext(c)
 
 	// update password
 	userDb, err := service.NewModelService[models.User]().GetById(userId)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
-	userDb.SetUpdated(u.Id)
-	userDb.Password = utils.EncryptMd5(payload.Password)
+	userDb.SetUpdated(by)
+	userDb.Password = utils.EncryptMd5(password)
 	if err := service.NewModelService[models.User]().ReplaceById(userDb.Id, *userDb); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.User](err)
 	}
 
-	// handle success
-	HandleSuccess(c)
+	return GetDataResponse(models.User{})
 }

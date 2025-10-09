@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"errors"
 	"github.com/crawlab-team/crawlab/core/constants"
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"github.com/crawlab-team/crawlab/core/models/models"
@@ -82,7 +81,8 @@ func (svc *Service) scheduleTasks(s *models.Spider, opts *interfaces.SpiderRunOp
 }
 
 func (svc *Service) getNodeIds(opts *interfaces.SpiderRunOptions) (nodeIds []primitive.ObjectID, err error) {
-	if opts.Mode == constants.RunTypeAllNodes {
+	switch opts.Mode {
+	case constants.RunTypeAllNodes:
 		query := bson.M{
 			"active":  true,
 			"enabled": true,
@@ -95,12 +95,10 @@ func (svc *Service) getNodeIds(opts *interfaces.SpiderRunOptions) (nodeIds []pri
 		for _, node := range nodes {
 			nodeIds = append(nodeIds, node.Id)
 		}
-	} else if opts.Mode == constants.RunTypeSelectedNodes {
+	case constants.RunTypeSelectedNodes:
 		nodeIds = opts.NodeIds
-	} else if opts.Mode == constants.RunTypeRandom {
+	default:
 		nodeIds = []primitive.ObjectID{primitive.NilObjectID}
-	} else {
-		return nil, errors.New("invalid run mode")
 	}
 	return nodeIds, nil
 }

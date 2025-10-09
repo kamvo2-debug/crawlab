@@ -2,39 +2,48 @@ package utils
 
 import (
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/mitchellh/go-homedir"
-	"github.com/spf13/viper"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/mitchellh/go-homedir"
+	"github.com/spf13/viper"
 )
 
 const (
-	DefaultWorkspace           = "crawlab_workspace"
-	DefaultTaskLogPath         = "/var/log/crawlab/tasks"
-	DefaultServerHost          = "0.0.0.0"
-	DefaultServerPort          = 8000
-	DefaultGrpcHost            = "localhost"
-	DefaultGrpcPort            = 9666
-	DefaultGrpcServerHost      = "0.0.0.0"
-	DefaultGrpcServerPort      = 9666
-	DefaultAuthKey             = "Crawlab2024!"
-	DefaultApiEndpoint         = "http://localhost:8000"
-	DefaultApiAllowOrigin      = "*"
-	DefaultApiAllowCredentials = "true"
-	DefaultApiAllowMethods     = "DELETE, POST, OPTIONS, GET, PUT"
-	DefaultApiAllowHeaders     = "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With"
-	DefaultApiPort             = 8080
-	DefaultApiPath             = "/api"
-	DefaultNodeMaxRunners      = 0 // 0 means no limit
-	DefaultInstallRoot         = "/app/install"
-	MetadataConfigDirName      = ".crawlab"
-	MetadataConfigName         = "config.json"
-	DefaultPyenvPath           = "/root/.pyenv"
-	DefaultNodeModulesPath     = "/usr/lib/node_modules"
-	DefaultNodeBinPath         = "/usr/lib/node_bin"
-	DefaultGoPath              = "/root/go"
+	DefaultWorkspace                  = "crawlab_workspace"
+	DefaultTaskLogPath                = "/var/log/crawlab/tasks"
+	DefaultServerHost                 = "0.0.0.0"
+	DefaultServerPort                 = 8000
+	DefaultGrpcHost                   = "localhost"
+	DefaultGrpcPort                   = 9666
+	DefaultGrpcServerHost             = "0.0.0.0"
+	DefaultGrpcServerPort             = 9666
+	DefaultAuthKey                    = "Crawlab2024!"
+	DefaultApiEndpoint                = "http://localhost:8000"
+	DefaultApiAllowOrigin             = "*"
+	DefaultApiAllowCredentials        = "true"
+	DefaultApiAllowMethods            = "DELETE, POST, OPTIONS, GET, PUT"
+	DefaultApiAllowHeaders            = "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With"
+	DefaultApiPort                    = 8080
+	DefaultApiPath                    = "/api"
+	DefaultNodeMaxRunners             = 20  // Default max concurrent task runners per node
+	DefaultTaskQueueSize              = 100 // Default task queue size per node
+	DefaultInstallRoot                = "/app/install"
+	DefaultInstallEnvs                = ""
+	MetadataConfigDirName             = ".crawlab"
+	MetadataConfigName                = "config.json"
+	DefaultPyenvPath                  = "/root/.pyenv"
+	DefaultNodeModulesPath            = "/usr/lib/node_modules"
+	DefaultNodeBinPath                = "/usr/lib/node_bin"
+	DefaultGoPath                     = "/root/go"
+	DefaultMCPServerHost              = "0.0.0.0"
+	DefaultMCPServerPort              = 9777
+	DefaultMCPClientBaseUrl           = "http://localhost:9777/sse"
+	DefaultOpenAPIUrlPath             = "/openapi.json"
+	DefaultSyncDownloadMaxConcurrency = 16
+	DefaultMinFileDescriptorLimit     = 8192
 )
 
 func IsDev() bool {
@@ -235,6 +244,13 @@ func GetNodeMaxRunners() int {
 	return DefaultNodeMaxRunners
 }
 
+func GetTaskQueueSize() int {
+	if res := viper.GetInt("task.queue.size"); res != 0 {
+		return res
+	}
+	return DefaultTaskQueueSize
+}
+
 func GetMetadataConfigPath() string {
 	var homeDirPath, err = homedir.Dir()
 	if err != nil {
@@ -256,6 +272,13 @@ func GetInstallRoot() string {
 		return res
 	}
 	return DefaultInstallRoot
+}
+
+func GetInstallEnvs() []string {
+	if res := viper.GetStringSlice("install.envs"); res != nil {
+		return res
+	}
+	return strings.Split(DefaultInstallEnvs, ",")
 }
 
 func GetPyenvPath() string {
@@ -284,4 +307,44 @@ func GetGoPath() string {
 		return res
 	}
 	return DefaultGoPath
+}
+
+func GetMCPServerAddress() string {
+	host := viper.GetString("mcp.server.host")
+	if host == "" {
+		host = DefaultMCPServerHost
+	}
+	port := viper.GetInt("mcp.server.port")
+	if port == 0 {
+		port = DefaultMCPServerPort
+	}
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
+func GetMCPClientBaseUrl() string {
+	if res := viper.GetString("mcp.client.base_url"); res != "" {
+		return res
+	}
+	return DefaultMCPClientBaseUrl
+}
+
+func GetOpenAPIUrl() string {
+	if res := viper.GetString("openapi.url"); res != "" {
+		return res
+	}
+	return GetApiEndpoint() + DefaultOpenAPIUrlPath
+}
+
+func GetSyncDownloadMaxConcurrency() int64 {
+	if res := viper.GetInt("sync.download.max_concurrency"); res > 0 {
+		return int64(res)
+	}
+	return int64(DefaultSyncDownloadMaxConcurrency)
+}
+
+func GetMinFileDescriptorLimit() uint64 {
+	if res := viper.GetUint64("system.fd_min"); res > 0 {
+		return res
+	}
+	return DefaultMinFileDescriptorLimit
 }

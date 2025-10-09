@@ -2,9 +2,10 @@ package middlewares
 
 import (
 	"context"
+
 	"github.com/crawlab-team/crawlab/core/errors"
 	"github.com/crawlab-team/crawlab/core/utils"
-	"github.com/grpc-ecosystem/go-grpc-middleware/auth"
+	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
@@ -43,7 +44,7 @@ func GetGrpcClientAuthTokenUnaryChainInterceptor() grpc.UnaryClientInterceptor {
 	// set auth key
 	md := metadata.Pairs(GrpcHeaderAuthorization, utils.GetAuthKey())
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		ctx = metadata.NewOutgoingContext(context.Background(), md)
+		ctx = metadata.NewOutgoingContext(ctx, md)
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 }
@@ -52,7 +53,7 @@ func GetGrpcClientAuthTokenStreamChainInterceptor() grpc.StreamClientInterceptor
 	// set auth key
 	md := metadata.Pairs(GrpcHeaderAuthorization, utils.GetAuthKey())
 	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-		ctx = metadata.NewOutgoingContext(context.Background(), md)
+		ctx = metadata.NewOutgoingContext(ctx, md)
 		s, err := streamer(ctx, desc, cc, method, opts...)
 		if err != nil {
 			return nil, err

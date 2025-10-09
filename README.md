@@ -25,17 +25,17 @@
 
 [Installation](#installation) | [Run](#run) | [Screenshot](#screenshot) | [Architecture](#architecture) | [Integration](#integration-with-other-frameworks) | [Compare](#comparison-with-other-frameworks) | [Community & Sponsorship](#community--sponsorship) | [CHANGELOG](https://github.com/crawlab-team/crawlab/blob/main/CHANGELOG.md) | [Disclaimer](https://github.com/crawlab-team/crawlab/blob/main/DISCLAIMER.md)
 
-Golang-based distributed web crawler management platform, supporting various languages including Python, NodeJS, Go, Java, PHP and various web crawler frameworks including Scrapy, Puppeteer, Selenium.
+Golang-based distributed web crawler management platform, supporting various languages including Python, NodeJS, Go, Java, and various web crawler frameworks including Scrapy, Puppeteer, Selenium.
 
-[Demo](https://demo.crawlab.cn) | [Documentation](https://docs.crawlab.cn/en/)
+[Demo](https://demo.crawlab.cn) | [Documentation](https://docs.crawlab.cn)
 
 ## Installation
 
-You can follow the [installation guide](https://docs.crawlab.cn/en/guide/installation/).
+You can follow the [installation guide](https://docs.crawlab.cn/getting-started/installation).
 
 ## Quick Start
 
-Please open the command line prompt and execute the command below. Make sure you have installed `docker-compose` in advance.
+Please open the command line prompt and execute the command below. Make sure you have installed [Docker](https://www.docker.com) in advance.
 
 ```bash
 git clone https://github.com/crawlab-team/examples
@@ -43,17 +43,15 @@ cd examples/docker/basic
 docker-compose up -d
 ```
 
-Next, you can look into the `docker-compose.yml` (with detailed config params) and the [Documentation](http://docs.crawlab.cn/en/) for further information. 
+Next, you can look into the `docker-compose.yml` (with detailed config params) and the [Documentation](http://docs.crawlab.cn) for further information. 
 
 ## Run
 
 ### Docker
 
-Please use `docker-compose` to one-click to start up. By doing so, you don't even have to configure MongoDB database. Create a file named `docker-compose.yml` and input the code below.
-
+Please use `docker compose` to one-click to start up. By doing so, you don't even have to configure MongoDB database. Create a file named `docker-compose.yml` and input the code below.
 
 ```yaml
-version: '3.3'
 services:
   master: 
     image: crawlabteam/crawlab:latest
@@ -73,8 +71,7 @@ services:
     container_name: crawlab_example_worker01
     environment:
       CRAWLAB_NODE_MASTER: "N"
-      CRAWLAB_GRPC_ADDRESS: "master"
-      CRAWLAB_FS_FILER_URL: "http://master:8080/api/filer"
+      CRAWLAB_MASTER_HOST: "master"
     volumes:
       - "./.crawlab/worker01:/root/.crawlab"
     depends_on:

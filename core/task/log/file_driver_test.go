@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -95,47 +97,68 @@ func TestFileDriver_Find(t *testing.T) {
 
 	driver := d
 
-	lines, err := driver.Find(id.Hex(), "", 0, 10)
-	require.Nil(t, err)
-	require.Equal(t, 10, len(lines))
-	require.Equal(t, "line: 1", lines[0])
-	require.Equal(t, "line: 10", lines[len(lines)-1])
+	t.Run("Normal Mode (tail=false)", func(t *testing.T) {
+		// Test reading first 10 lines
+		lines, err := driver.Find(id.Hex(), "", 0, 10, false)
+		require.Nil(t, err)
+		assert.Equal(t, 10, len(lines))
+		assert.Equal(t, "line: 1", lines[0])
+		assert.Equal(t, "line: 10", lines[9])
 
-	lines, err = driver.Find(id.Hex(), "", 0, 1)
-	require.Nil(t, err)
-	require.Equal(t, 1, len(lines))
-	require.Equal(t, "line: 1", lines[0])
-	require.Equal(t, "line: 1", lines[len(lines)-1])
+		// Test reading with skip
+		lines, err = driver.Find(id.Hex(), "", 5, 5, false)
+		require.Nil(t, err)
+		assert.Equal(t, 5, len(lines))
+		assert.Equal(t, "line: 6", lines[0])
+		assert.Equal(t, "line: 10", lines[4])
 
-	lines, err = driver.Find(id.Hex(), "", 0, 1000)
-	require.Nil(t, err)
-	require.Equal(t, 1000, len(lines))
-	require.Equal(t, "line: 1", lines[0])
-	require.Equal(t, "line: 1000", lines[len(lines)-1])
+		// Test reading with no limit (should read to end)
+		lines, err = driver.Find(id.Hex(), "", 9995, 0, false)
+		require.Nil(t, err)
+		assert.Equal(t, 5, len(lines))
+		assert.Equal(t, "line: 9996", lines[0])
+		assert.Equal(t, "line: 10000", lines[4])
 
-	lines, err = driver.Find(id.Hex(), "", 1000, 1000)
-	require.Nil(t, err)
-	require.Equal(t, 1000, len(lines))
-	require.Equal(t, "line: 1001", lines[0])
-	require.Equal(t, "line: 2000", lines[len(lines)-1])
+		// Test reading past end
+		lines, err = driver.Find(id.Hex(), "", 10000, 10, false)
+		require.Nil(t, err)
+		assert.Equal(t, 0, len(lines))
+	})
 
-	lines, err = driver.Find(id.Hex(), "", 1001, 1000)
-	require.Nil(t, err)
-	require.Equal(t, 1000, len(lines))
-	require.Equal(t, "line: 1002", lines[0])
-	require.Equal(t, "line: 2001", lines[len(lines)-1])
+	t.Run("Tail Mode (tail=true)", func(t *testing.T) {
+		// Test reading last 10 lines
+		lines, err := driver.Find(id.Hex(), "", 0, 10, true)
+		require.Nil(t, err)
+		assert.Equal(t, 10, len(lines))
+		assert.Equal(t, "line: 9991", lines[0])
+		assert.Equal(t, "line: 10000", lines[9])
 
-	lines, err = driver.Find(id.Hex(), "", 1001, 999)
-	require.Nil(t, err)
-	require.Equal(t, 999, len(lines))
-	require.Equal(t, "line: 1002", lines[0])
-	require.Equal(t, "line: 2000", lines[len(lines)-1])
+		// Test reading with skip from end
+		lines, err = driver.Find(id.Hex(), "", 5, 10, true)
+		require.Nil(t, err)
+		assert.Equal(t, 10, len(lines))
+		assert.Equal(t, "line: 9986", lines[0])
+		assert.Equal(t, "line: 9995", lines[9])
 
-	lines, err = driver.Find(id.Hex(), "", 999, 2001)
-	require.Nil(t, err)
-	require.Equal(t, 2001, len(lines))
-	require.Equal(t, "line: 1000", lines[0])
-	require.Equal(t, "line: 3000", lines[len(lines)-1])
+		// Test reading with no limit (should read all lines after skip)
+		lines, err = driver.Find(id.Hex(), "", 5, 0, true)
+		require.Nil(t, err)
+		assert.Equal(t, 9995, len(lines))
+		assert.Equal(t, "line: 1", lines[0])
+		assert.Equal(t, "line: 9995", lines[9994])
+
+		// Test reading with large skip
+		lines, err = driver.Find(id.Hex(), "", 9995, 10, true)
+		require.Nil(t, err)
+		assert.Equal(t, 5, len(lines))
+		assert.Equal(t, "line: 1", lines[0])
+		assert.Equal(t, "line: 5", lines[4])
+
+		// Test reading with skip larger than file
+		lines, err = driver.Find(id.Hex(), "", 10001, 10, true)
+		require.Nil(t, err)
+		assert.Equal(t, 0, len(lines))
+	})
 
 	cleanupFileDriverTest()
 }

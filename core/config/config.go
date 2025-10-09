@@ -2,13 +2,14 @@ package config
 
 import (
 	"errors"
-	"github.com/crawlab-team/crawlab/core/interfaces"
-	"github.com/crawlab-team/crawlab/core/utils"
 	"strings"
 	"sync"
 
 	"github.com/apex/log"
+	"github.com/crawlab-team/crawlab/core/interfaces"
+	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/fsnotify/fsnotify"
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
@@ -18,6 +19,9 @@ type Config struct {
 }
 
 func (c *Config) Init() {
+	// Load .env file before setting up viper
+	c.loadDotEnv()
+
 	// Set default values
 	c.setDefaults()
 
@@ -46,7 +50,9 @@ func (c *Config) Init() {
 	if err := viper.ReadInConfig(); err != nil {
 		var configFileNotFoundError viper.ConfigFileNotFoundError
 		if errors.As(err, &configFileNotFoundError) {
-			c.Warn("No config file found. Using default values.")
+			if c.Logger != nil {
+				c.Warn("No config file found. Using default values.")
+			}
 		}
 	}
 
@@ -57,7 +63,9 @@ func (c *Config) Init() {
 func (c *Config) WatchConfig() {
 	viper.WatchConfig()
 	viper.OnConfigChange(func(e fsnotify.Event) {
-		c.Infof("Config file changed: %s", e.Name)
+		if c.Logger != nil {
+			c.Infof("Config file changed: %s", e.Name)
+		}
 	})
 }
 
@@ -78,6 +86,19 @@ func (c *Config) initLogLevel() {
 		l = log.InfoLevel
 	}
 	log.SetLevel(l)
+}
+
+func (c *Config) loadDotEnv() {
+	// Try to load .env file, but don't fail if it doesn't exist
+	if err := godotenv.Load(); err != nil {
+		if c.Logger != nil {
+			c.Debug("No .env file found or unable to load .env file")
+		}
+	} else {
+		if c.Logger != nil {
+			c.Info("Loaded .env file successfully")
+		}
+	}
 }
 
 func newConfig() *Config {

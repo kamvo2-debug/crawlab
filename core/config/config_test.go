@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,7 +54,10 @@ server:
 	os.Unsetenv("CRAWLAB_MONGO_HOST")
 
 	// Create a new Config instance with the config file
-	cWithFile := Config{Name: configPath}
+	cWithFile := Config{
+		Name:   configPath,
+		Logger: utils.NewLogger("Config"),
+	}
 	cWithFile.Init()
 
 	// Test values from config file

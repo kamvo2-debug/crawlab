@@ -1,86 +1,47 @@
 package controllers
 
 import (
-	"errors"
 	"github.com/crawlab-team/crawlab/core/models/models"
 	"github.com/crawlab-team/crawlab/core/models/service"
-	"github.com/crawlab-team/crawlab/core/mongo"
 	"github.com/gin-gonic/gin"
+	"github.com/juju/errors"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	mongo2 "go.mongodb.org/mongo-driver/mongo"
 )
 
-func GetProjectList(c *gin.Context) {
-	// get all list
-	all := MustGetFilterAll(c)
-	if all {
-		NewController[models.Project]().getAll(c)
-		return
-	}
-
-	// params
-	pagination := MustGetPagination(c)
-	query := MustGetFilterQuery(c)
-	sort := MustGetSortOption(c)
-
-	// get list
-	projects, err := service.NewModelService[models.Project]().GetMany(query, &mongo.FindOptions{
-		Sort:  sort,
-		Skip:  pagination.Size * (pagination.Page - 1),
-		Limit: pagination.Size,
-	})
+func GetProjectList(_ *gin.Context, params *GetListParams) (response *ListResponse[models.ProjectDTO], err error) {
+	query := ConvertToBsonMFromListParams(params)
+	sort, err := GetSortOptionFromString(params.Sort)
 	if err != nil {
-		if err.Error() != mongo2.ErrNoDocuments.Error() {
-			HandleErrorInternalServerError(c, err)
-		}
-		return
+		return GetErrorListResponse[models.ProjectDTO](errors.BadRequestf("invalid request parameters: %v", err))
 	}
-	if len(projects) == 0 {
-		HandleSuccessWithListData(c, []models.Project{}, 0)
-		return
-	}
+	skip, limit := GetSkipLimitFromListParams(params)
 
 	// total count
 	total, err := service.NewModelService[models.Project]().Count(query)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorListResponse[models.ProjectDTO](err)
 	}
 
-	// project ids
-	var ids []primitive.ObjectID
-
-	// count cache
-	cache := map[primitive.ObjectID]int{}
-	for _, p := range projects {
-		ids = append(ids, p.Id)
-		cache[p.Id] = 0
+	// check total
+	if total == 0 {
+		return GetEmptyListResponse[models.ProjectDTO]()
 	}
 
-	// spiders
-	spiders, err := service.NewModelService[models.Spider]().GetMany(bson.M{
-		"project_id": bson.M{
-			"$in": ids,
-		},
-	}, nil)
+	// aggregation pipelines
+	pipelines := service.GetPaginationPipeline(query, sort, skip, limit)
+	pipelines = addProjectPipelines(pipelines)
+
+	// perform query
+	var projects []models.ProjectDTO
+	err = service.GetCollection[models.Project]().Aggregate(pipelines, nil).All(&projects)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
-	}
-	for _, s := range spiders {
-		_, ok := cache[s.ProjectId]
-		if !ok {
-			HandleErrorInternalServerError(c, errors.New("project id not found"))
-			return
-		}
-		cache[s.ProjectId]++
+		return GetErrorListResponse[models.ProjectDTO](err)
 	}
 
-	// assign
-	for i, p := range projects {
-		projects[i].Spiders = cache[p.Id]
-	}
+	return GetListResponse[models.ProjectDTO](projects, total)
+}
 
-	HandleSuccessWithListData(c, projects, total)
+func addProjectPipelines(pipelines []bson.D) []bson.D {
+	pipelines = append(pipelines, service.GetLookupPipeline[models.Spider]("_id", "project_id", "_spiders"))
+	return pipelines
 }

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "crawlab": {
+      "command": "node",
+      "args": ["/home/marvin/projects/crawlab-team/crawlab-pro/mcp/dist/index.js", "http://localhost:8080"],
+      "env": {
+        "CRAWLAB_API_TOKEN": "your-api-token-here"
+      }
+    }
+  }
+}

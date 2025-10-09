@@ -19,7 +19,15 @@ apt-get install -y \
     iputils-ping \
     nginx \
     jq \
-    net-tools
+    net-tools \
+    fonts-wqy-zenhei \
+    fonts-noto-cjk \
+    fontconfig \
+    locales
+
+# Generate Chinese locale
+locale-gen zh_CN.UTF-8
+update-locale
 
 # Add source /etc/profile to ~/.bashrc
 echo "source /etc/profile" >> ~/.bashrc

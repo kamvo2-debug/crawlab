@@ -1,13 +1,14 @@
 package constants
 
 const (
-	TaskStatusPending   = "pending"
-	TaskStatusAssigned  = "assigned"
-	TaskStatusRunning   = "running"
-	TaskStatusFinished  = "finished"
-	TaskStatusError     = "error"
-	TaskStatusCancelled = "cancelled"
-	TaskStatusAbnormal  = "abnormal"
+	TaskStatusPending          = "pending"
+	TaskStatusAssigned         = "assigned"
+	TaskStatusRunning          = "running"
+	TaskStatusFinished         = "finished"
+	TaskStatusError            = "error"
+	TaskStatusCancelled        = "cancelled"
+	TaskStatusAbnormal         = "abnormal"
+	TaskStatusNodeDisconnected = "node_disconnected"
 )
 
 const (

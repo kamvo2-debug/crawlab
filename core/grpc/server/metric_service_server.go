@@ -2,14 +2,15 @@ package server
 
 import (
 	"context"
+	"sync"
+	"time"
+
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"github.com/crawlab-team/crawlab/core/models/models"
 	"github.com/crawlab-team/crawlab/core/models/service"
 	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/crawlab-team/crawlab/grpc"
 	"go.mongodb.org/mongo-driver/bson"
-	"sync"
-	"time"
 )
 
 type MetricServiceServer struct {
@@ -40,6 +41,7 @@ func (svr MetricServiceServer) Send(_ context.Context, req *grpc.MetricServiceSe
 		DiskWriteBytesRate:   req.DiskWriteBytesRate,
 		NetworkBytesSentRate: req.NetworkBytesSentRate,
 		NetworkBytesRecvRate: req.NetworkBytesRecvRate,
+		GoroutineCount:       req.GoroutineCount,
 	}
 	metric.CreatedAt = time.Unix(req.Timestamp, 0)
 	_, err = service.NewModelService[models.Metric]().InsertOne(metric)

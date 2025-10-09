@@ -20,7 +20,7 @@ message NodeServiceSubscribeRequest {
 }
 
 enum NodeServiceSubscribeCode {
-  PING = 0;
+  HEARTBEAT = 0;
 }
 
 message NodeServiceSubscribeResponse {

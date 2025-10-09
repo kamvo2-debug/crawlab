@@ -2,12 +2,13 @@ package notification
 
 import (
 	"fmt"
-	"github.com/crawlab-team/crawlab/core/interfaces"
-	"github.com/crawlab-team/crawlab/core/utils"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/crawlab-team/crawlab/core/interfaces"
+	"github.com/crawlab-team/crawlab/core/utils"
 
 	"github.com/crawlab-team/crawlab/core/constants"
 	"github.com/crawlab-team/crawlab/core/entity"
@@ -25,11 +26,26 @@ type Service struct {
 func (svc *Service) Send(s *models.NotificationSetting, args ...any) {
 	title := s.Title
 
+	// Use bounded goroutine pool to prevent unlimited goroutine creation
+	const maxWorkers = 5
 	wg := sync.WaitGroup{}
-	wg.Add(len(s.ChannelIds))
+	semaphore := make(chan struct{}, maxWorkers)
+
 	for _, chId := range s.ChannelIds {
+		wg.Add(1)
+
+		// Acquire semaphore
+		semaphore <- struct{}{}
+
 		go func(chId primitive.ObjectID) {
-			defer wg.Done()
+			defer func() {
+				<-semaphore // Release semaphore
+				wg.Done()
+				if r := recover(); r != nil {
+					svc.Errorf("[NotificationService] channel handler panic for %s: %v", chId.Hex(), r)
+				}
+			}()
+
 			ch, err := service.NewModelService[models.NotificationChannel]().GetById(chId)
 			if err != nil {
 				svc.Errorf("[NotificationService] get channel error: %v", err)
@@ -40,7 +56,7 @@ func (svc *Service) Send(s *models.NotificationSetting, args ...any) {
 			case TypeMail:
 				svc.SendMail(s, ch, title, content)
 			case TypeIM:
-				svc.SendIM(ch, title, content)
+				svc.SendIM(s, ch, title, content)
 			}
 		}(chId)
 	}
@@ -61,13 +77,13 @@ func (svc *Service) SendMail(s *models.NotificationSetting, ch *models.Notificat
 		svc.Errorf("[NotificationService] send mail error: %v", err)
 	}
 
-	// save request
-	go svc.saveRequest(r, err)
+	// save request synchronously to avoid unbounded goroutines
+	svc.saveRequest(r, err)
 }
 
-func (svc *Service) SendIM(ch *models.NotificationChannel, title, content string) {
+func (svc *Service) SendIM(s *models.NotificationSetting, ch *models.NotificationChannel, title, content string) {
 	// request
-	r, _ := svc.createRequestIM(ch, title, content, false)
+	r, _ := svc.createRequestIM(s, ch, title, content, false)
 
 	// send mobile notification
 	err := SendIMNotification(ch, title, content)
@@ -75,8 +91,8 @@ func (svc *Service) SendIM(ch *models.NotificationChannel, title, content string
 		svc.Errorf("[NotificationService] send mobile notification error: %v", err)
 	}
 
-	// save request
-	go svc.saveRequest(r, err)
+	// save request synchronously to avoid unbounded goroutines
+	svc.saveRequest(r, err)
 }
 
 func (svc *Service) SendTestMessage(locale string, ch *models.NotificationChannel, toMail []string) (err error) {
@@ -103,7 +119,7 @@ func (svc *Service) SendTestMessage(locale string, ch *models.NotificationChanne
 		}
 
 		// Create request
-		r, _ = svc.createRequestMailTest(ch, title, content, toMail)
+		r, _ = svc.createRequestMailTest(nil, ch, title, content, toMail)
 
 		// For email
 		err = SendMail(nil, ch, toMail, nil, nil, title, content)
@@ -113,7 +129,7 @@ func (svc *Service) SendTestMessage(locale string, ch *models.NotificationChanne
 
 	case TypeIM:
 		// Create request
-		r, _ = svc.createRequestIM(ch, title, content, true)
+		r, _ = svc.createRequestIM(nil, ch, title, content, true)
 
 		// For instant messaging
 		err = SendIMNotification(ch, title, content)
@@ -125,8 +141,8 @@ func (svc *Service) SendTestMessage(locale string, ch *models.NotificationChanne
 		return fmt.Errorf("unsupported notification channel type: %s", ch.Type)
 	}
 
-	// Save request
-	go svc.saveRequest(r, err)
+	// Save request synchronously to avoid unbounded goroutines
+	svc.saveRequest(r, err)
 
 	return err
 }
@@ -175,17 +191,15 @@ func (svc *Service) geContentWithVariables(template string, variables []entity.N
 				content = strings.ReplaceAll(content, v.GetKey(), vd.Task.Error)
 			case "pid":
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%d", vd.Task.Pid))
-			case "type":
-				content = strings.ReplaceAll(content, v.GetKey(), vd.Task.Type)
 			case "mode":
 				content = strings.ReplaceAll(content, v.GetKey(), vd.Task.Mode)
 			case "priority":
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%d", vd.Task.Priority))
-			case "created_ts":
+			case "created_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Task.CreatedAt))
 			case "created_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Task.CreatedBy))
-			case "updated_ts":
+			case "updated_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Task.UpdatedAt))
 			case "updated_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Task.UpdatedBy))
@@ -197,10 +211,10 @@ func (svc *Service) geContentWithVariables(template string, variables []entity.N
 				continue
 			}
 			switch v.Name {
-			case "start_ts":
-				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.TaskStat.StartTs))
-			case "end_ts":
-				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.TaskStat.EndTs))
+			case "started_at":
+				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.TaskStat.StartedAt))
+			case "ended_at":
+				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.TaskStat.EndedAt))
 			case "wait_duration":
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%ds", vd.TaskStat.WaitDuration/1000))
 			case "runtime_duration":
@@ -231,11 +245,11 @@ func (svc *Service) geContentWithVariables(template string, variables []entity.N
 				content = strings.ReplaceAll(content, v.GetKey(), vd.Spider.Param)
 			case "priority":
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%d", vd.Spider.Priority))
-			case "created_ts":
+			case "created_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Spider.CreatedAt))
 			case "created_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Spider.CreatedBy))
-			case "updated_ts":
+			case "updated_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Spider.UpdatedAt))
 			case "updated_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Spider.UpdatedBy))
@@ -275,11 +289,11 @@ func (svc *Service) geContentWithVariables(template string, variables []entity.N
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%d", vd.Node.CurrentRunners))
 			case "max_runners":
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%d", vd.Node.MaxRunners))
-			case "created_ts":
+			case "created_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Node.CreatedAt))
 			case "created_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Node.CreatedBy))
-			case "updated_ts":
+			case "updated_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Node.UpdatedAt))
 			case "updated_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Node.UpdatedBy))
@@ -309,11 +323,11 @@ func (svc *Service) geContentWithVariables(template string, variables []entity.N
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%d", vd.Schedule.Priority))
 			case "enabled":
 				content = strings.ReplaceAll(content, v.GetKey(), fmt.Sprintf("%t", vd.Schedule.Enabled))
-			case "created_ts":
+			case "created_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Schedule.CreatedAt))
 			case "created_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Schedule.CreatedBy))
-			case "updated_ts":
+			case "updated_at":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getFormattedTime(vd.Schedule.UpdatedAt))
 			case "updated_by":
 				content = strings.ReplaceAll(content, v.GetKey(), svc.getUsernameById(vd.Schedule.UpdatedBy))
@@ -362,21 +376,21 @@ func (svc *Service) geContentWithVariables(template string, variables []entity.N
 
 func (svc *Service) getVariableData(args ...any) (vd VariableData) {
 	for _, arg := range args {
-		switch arg.(type) {
+		switch arg := arg.(type) {
 		case *models.Task:
-			vd.Task = arg.(*models.Task)
+			vd.Task = arg
 		case *models.TaskStat:
-			vd.TaskStat = arg.(*models.TaskStat)
+			vd.TaskStat = arg
 		case *models.Spider:
-			vd.Spider = arg.(*models.Spider)
+			vd.Spider = arg
 		case *models.Node:
-			vd.Node = arg.(*models.Node)
+			vd.Node = arg
 		case *models.Schedule:
-			vd.Schedule = arg.(*models.Schedule)
+			vd.Schedule = arg
 		case *models.NotificationAlert:
-			vd.Alert = arg.(*models.NotificationAlert)
+			vd.Alert = arg
 		case *models.Metric:
-			vd.Metric = arg.(*models.Metric)
+			vd.Metric = arg
 		}
 	}
 	return vd
@@ -384,7 +398,7 @@ func (svc *Service) getVariableData(args ...any) (vd VariableData) {
 
 func (svc *Service) parseTemplateVariables(template string) (variables []entity.NotificationVariable) {
 	// regex pattern
-	regex := regexp.MustCompile("\\$\\{(\\w+):(\\w+)}")
+	regex := regexp.MustCompile(`\$\{(\w+):(\w+)\}`)
 
 	// find all matches
 	matches := regex.FindAllStringSubmatch(template, -1)
@@ -473,6 +487,8 @@ func (svc *Service) getFormattedMetricValue(metricName string, m *models.Metric)
 		return fmt.Sprintf("%.2fMB/s", m.NetworkBytesSentRate/(1024*1024))
 	case "network_bytes_recv_rate":
 		return fmt.Sprintf("%.2fMB/s", m.NetworkBytesRecvRate/(1024*1024))
+	case "goroutine_count":
+		return fmt.Sprintf("%d", m.GoroutineCount)
 	default:
 		return "N/A"
 	}
@@ -499,21 +515,42 @@ func (svc *Service) SendNodeNotification(node *models.Node) {
 		return
 	}
 
+	// Use bounded goroutine pool for node notifications
+	const maxWorkers = 3
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, maxWorkers)
+
 	for _, s := range settings {
-		// send notification
-		switch s.Trigger {
-		case constants.NotificationTriggerNodeStatusChange:
-			go svc.Send(&s, args...)
-		case constants.NotificationTriggerNodeOnline:
-			if node.Status == constants.NodeStatusOnline {
-				go svc.Send(&s, args...)
+		wg.Add(1)
+
+		// Acquire semaphore
+		semaphore <- struct{}{}
+
+		go func(setting models.NotificationSetting) {
+			defer func() {
+				<-semaphore // Release semaphore
+				wg.Done()
+				if r := recover(); r != nil {
+					svc.Errorf("[NotificationService] node notification panic for setting %s: %v", setting.Id.Hex(), r)
+				}
+			}()
+
+			// send notification
+			switch setting.Trigger {
+			case constants.NotificationTriggerNodeStatusChange:
+				svc.Send(&setting, args...)
+			case constants.NotificationTriggerNodeOnline:
+				if node.Status == constants.NodeStatusOnline {
+					svc.Send(&setting, args...)
+				}
+			case constants.NotificationTriggerNodeOffline:
+				if node.Status == constants.NodeStatusOffline {
+					svc.Send(&setting, args...)
+				}
 			}
-		case constants.NotificationTriggerNodeOffline:
-			if node.Status == constants.NodeStatusOffline {
-				go svc.Send(&s, args...)
-			}
-		}
+		}(s)
 	}
+	wg.Wait()
 }
 
 func (svc *Service) createRequestMail(s *models.NotificationSetting, ch *models.NotificationChannel, title, content string) (res *models.NotificationRequest, err error) {
@@ -543,7 +580,7 @@ func (svc *Service) createRequestMail(s *models.NotificationSetting, ch *models.
 	return &r, nil
 }
 
-func (svc *Service) createRequestMailTest(ch *models.NotificationChannel, title, content string, mailTo []string) (res *models.NotificationRequest, err error) {
+func (svc *Service) createRequestMailTest(s *models.NotificationSetting, ch *models.NotificationChannel, title, content string, mailTo []string) (res *models.NotificationRequest, err error) {
 	if mailTo == nil {
 		mailTo = []string{ch.SMTPUsername}
 	}
@@ -559,6 +596,11 @@ func (svc *Service) createRequestMailTest(ch *models.NotificationChannel, title,
 		Test:        true,
 	}
 
+	// Set SettingId if setting is provided (for non-test requests)
+	if s != nil {
+		r.SettingId = s.Id
+	}
+
 	r.SetCreatedAt(time.Now())
 	r.SetUpdatedAt(time.Now())
 	r.Id, err = service.NewModelService[models.NotificationRequest]().InsertOne(r)
@@ -569,7 +611,7 @@ func (svc *Service) createRequestMailTest(ch *models.NotificationChannel, title,
 	return &r, nil
 }
 
-func (svc *Service) createRequestIM(ch *models.NotificationChannel, title, content string, test bool) (res *models.NotificationRequest, err error) {
+func (svc *Service) createRequestIM(s *models.NotificationSetting, ch *models.NotificationChannel, title, content string, test bool) (res *models.NotificationRequest, err error) {
 	r := models.NotificationRequest{
 		Status:    StatusSending,
 		ChannelId: ch.Id,
@@ -577,6 +619,12 @@ func (svc *Service) createRequestIM(ch *models.NotificationChannel, title, conte
 		Content:   content,
 		Test:      test,
 	}
+
+	// Set SettingId if setting is provided (for non-test requests)
+	if s != nil {
+		r.SettingId = s.Id
+	}
+
 	r.SetCreatedAt(time.Now())
 	r.SetUpdatedAt(time.Now())
 	r.Id, err = service.NewModelService[models.NotificationRequest]().InsertOne(r)

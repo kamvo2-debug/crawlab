@@ -1,87 +1,89 @@
 package controllers
 
 import (
-	"errors"
 	"fmt"
+
 	"github.com/crawlab-team/crawlab/core/constants"
 	"github.com/crawlab-team/crawlab/core/export"
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"github.com/gin-gonic/gin"
+	"github.com/juju/errors"
 )
 
-func PostExport(c *gin.Context) {
-	exportType := c.Param("type")
-	exportTarget := c.Query("target")
-	exportFilter, _ := GetFilter(c)
+type PostExportParams struct {
+	Type   string `path:"type" validate:"required"`
+	Target string `query:"target" validate:"required"`
+	Filter string `query:"filter" description:"Filter query"`
+}
 
+func PostExport(_ *gin.Context, params *PostExportParams) (response *Response[string], err error) {
+	query := ConvertToBsonMFromFilter(params.Filter)
 	var exportId string
-	var err error
-	switch exportType {
+	switch params.Type {
 	case constants.ExportTypeCsv:
-		exportId, err = export.GetCsvService().Export(exportType, exportTarget, exportFilter)
+		exportId, err = export.GetCsvService().Export(params.Type, params.Target, query)
 	case constants.ExportTypeJson:
-		exportId, err = export.GetJsonService().Export(exportType, exportTarget, exportFilter)
+		exportId, err = export.GetJsonService().Export(params.Type, params.Target, query)
 	default:
-		HandleErrorBadRequest(c, errors.New(fmt.Sprintf("invalid export type: %s", exportType)))
-		return
+		return GetErrorResponse[string](errors.BadRequestf("invalid export type: %s", params.Type))
 	}
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[string](err)
 	}
 
-	HandleSuccessWithData(c, exportId)
+	return GetDataResponse(exportId)
 }
 
-func GetExport(c *gin.Context) {
-	exportType := c.Param("type")
-	exportId := c.Param("id")
-
-	var exp interfaces.Export
-	var err error
-	switch exportType {
-	case constants.ExportTypeCsv:
-		exp, err = export.GetCsvService().GetExport(exportId)
-	case constants.ExportTypeJson:
-		exp, err = export.GetJsonService().GetExport(exportId)
-	default:
-		HandleErrorBadRequest(c, errors.New(fmt.Sprintf("invalid export type: %s", exportType)))
-	}
-	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
-	}
-
-	HandleSuccessWithData(c, exp)
+type GetExportParams struct {
+	Type string `path:"type" validate:"required"`
+	Id   string `path:"id" validate:"required"`
 }
 
-func GetExportDownload(c *gin.Context) {
-	exportType := c.Param("type")
-	exportId := c.Param("id")
-
+func GetExport(_ *gin.Context, params *GetExportParams) (response *Response[interfaces.Export], err error) {
 	var exp interfaces.Export
-	var err error
-	switch exportType {
+	switch params.Type {
 	case constants.ExportTypeCsv:
-		exp, err = export.GetCsvService().GetExport(exportId)
+		exp, err = export.GetCsvService().GetExport(params.Id)
 	case constants.ExportTypeJson:
-		exp, err = export.GetJsonService().GetExport(exportId)
+		exp, err = export.GetJsonService().GetExport(params.Id)
 	default:
-		HandleErrorBadRequest(c, errors.New(fmt.Sprintf("invalid export type: %s", exportType)))
+		return GetErrorResponse[interfaces.Export](errors.BadRequestf("invalid export type: %s", params.Type))
 	}
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[interfaces.Export](err)
 	}
 
-	switch exportType {
+	return GetDataResponse(exp)
+}
+
+type GetExportDownloadParams struct {
+	Type string `path:"type" validate:"required"`
+	Id   string `path:"id" validate:"required"`
+}
+
+func GetExportDownload(c *gin.Context, params *GetExportDownloadParams) (err error) {
+	var exp interfaces.Export
+	switch params.Type {
+	case constants.ExportTypeCsv:
+		exp, err = export.GetCsvService().GetExport(params.Id)
+	case constants.ExportTypeJson:
+		exp, err = export.GetJsonService().GetExport(params.Id)
+	default:
+		return errors.BadRequestf("invalid export type: %s", params.Type)
+	}
+	if err != nil {
+		return err
+	}
+
+	switch params.Type {
 	case constants.ExportTypeCsv:
 		c.Header("Content-Type", "text/csv")
 	case constants.ExportTypeJson:
 		c.Header("Content-Type", "text/plain")
 	default:
-		HandleErrorBadRequest(c, errors.New(fmt.Sprintf("invalid export type: %s", exportType)))
+		return errors.BadRequestf("invalid export type: %s", params.Type)
 	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", exp.GetDownloadPath()))
 	c.File(exp.GetDownloadPath())
+	return nil
 }

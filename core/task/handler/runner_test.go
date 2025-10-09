@@ -63,7 +63,6 @@ func setupRunner(t *testing.T) *Runner {
 	task := &models.Task{
 		SpiderId: spiderId,
 		Status:   constants.TaskStatusPending,
-		Type:     "test",
 		Mode:     "test",
 		NodeId:   primitive.NewObjectID(),
 	}

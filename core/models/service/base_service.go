@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
-	"github.com/crawlab-team/crawlab/core/mongo"
 	"reflect"
 	"sync"
+
+	"github.com/crawlab-team/crawlab/core/mongo"
+	"github.com/crawlab-team/crawlab/core/utils"
 
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -23,6 +25,10 @@ var (
 
 type ModelService[T any] struct {
 	col *mongo.Col
+}
+
+func (svc *ModelService[T]) GetCol() (col *mongo.Col) {
+	return svc.col
 }
 
 func (svc *ModelService[T]) GetById(id primitive.ObjectID) (model *T, err error) {
@@ -250,6 +256,7 @@ func (svc *ModelService[T]) InsertManyContext(ctx context.Context, models []T) (
 	}
 	return ids, nil
 }
+
 func (svc *ModelService[T]) UpsertOne(query bson.M, model T) (id primitive.ObjectID, err error) {
 	opts := options.ReplaceOptions{}
 	opts.SetUpsert(true)
@@ -293,8 +300,24 @@ func (svc *ModelService[T]) Count(query bson.M) (total int, err error) {
 	return svc.col.Count(query)
 }
 
-func (svc *ModelService[T]) GetCol() (col *mongo.Col) {
-	return svc.col
+func (svc *ModelService[T]) AggregateAll(pipeline []bson.D, result any) (err error) {
+	return svc.AggregateWithOptionsAll(pipeline, nil, result)
+}
+
+func (svc *ModelService[T]) AggregateWithOptionsAll(pipeline []bson.D, opts *options.AggregateOptions, result any) (err error) {
+	return svc.aggregateWithOptions(pipeline, opts).All(result)
+}
+
+func (svc *ModelService[T]) AggregateOne(pipeline []bson.D, result any) (err error) {
+	return svc.AggregateWithOptionsOne(pipeline, nil, result)
+}
+
+func (svc *ModelService[T]) AggregateWithOptionsOne(pipeline []bson.D, opts *options.AggregateOptions, result any) (err error) {
+	return svc.aggregateWithOptions(pipeline, opts).One(result)
+}
+
+func (svc *ModelService[T]) aggregateWithOptions(pipeline []bson.D, opts *options.AggregateOptions) (fr *mongo.FindResult) {
+	return svc.GetCol().Aggregate(pipeline, opts)
 }
 
 func GetCollectionNameByInstance(v any) string {
@@ -303,11 +326,65 @@ func GetCollectionNameByInstance(v any) string {
 	return field.Tag.Get("collection")
 }
 
-func getCollectionName[T any]() string {
+func GetCollectionName[T any]() string {
 	var instance T
-	t := reflect.TypeOf(instance)
+	return getCollectionNameFromType(reflect.TypeOf(instance))
+}
+
+// getCollectionNameFromType recursively searches for collection tag in struct hierarchy
+// The function follows the Crawlab pattern where collection tags are typically on the first field
+func getCollectionNameFromType(t reflect.Type) string {
+	// Handle pointer types
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	// Must be a struct
+	if t.Kind() != reflect.Struct {
+		return ""
+	}
+
+	// Check if struct has any fields
+	if t.NumField() == 0 {
+		return ""
+	}
+
+	// Priority 1: Check the first field for collection tag (Crawlab standard pattern)
+	// Most Crawlab models have: `any collection:"collection_name"` as first field
 	field := t.Field(0)
-	return field.Tag.Get("collection")
+	if collectionName := field.Tag.Get("collection"); collectionName != "" {
+		return collectionName
+	}
+
+	// Priority 2: If first field is an embedded struct, recursively check it
+	// This handles DTO patterns like SpiderDTO embedding Spider
+	if field.Type.Kind() == reflect.Struct && field.Anonymous {
+		if collectionName := getCollectionNameFromType(field.Type); collectionName != "" {
+			return collectionName
+		}
+	}
+
+	// Priority 3: Fallback - check all remaining fields for collection tag
+	// This provides robustness for non-standard patterns
+	for i := 1; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if collectionName := field.Tag.Get("collection"); collectionName != "" {
+			return collectionName
+		}
+
+		// Also recursively check embedded structs in other positions
+		if field.Type.Kind() == reflect.Struct && field.Anonymous {
+			if collectionName := getCollectionNameFromType(field.Type); collectionName != "" {
+				return collectionName
+			}
+		}
+	}
+
+	return ""
+}
+
+func GetCollection[T any]() *mongo.Col {
+	return mongo.GetMongoCol(GetCollectionName[T]())
 }
 
 // NewModelService return singleton instance of ModelService
@@ -324,7 +401,7 @@ func NewModelService[T any]() *ModelService[T] {
 	var instance *ModelService[T]
 
 	onceMap[typeName].Do(func() {
-		collectionName := getCollectionName[T]()
+		collectionName := GetCollectionName[T]()
 		collection := mongo.GetMongoCol(collectionName)
 		instance = &ModelService[T]{col: collection}
 		instanceMap[typeName] = instance
@@ -350,4 +427,81 @@ func NewModelServiceWithColName[T any](colName string) *ModelService[T] {
 	})
 
 	return instanceMap[colName].(*ModelService[T])
+}
+
+func GetDefaultJoinPipeline[T any]() []bson.D {
+	return []bson.D{
+		GetDefaultLookupPipeline[T](),
+		GetDefaultUnwindPipeline[T](),
+	}
+}
+
+func GetJoinPipeline[T any](localField, foreignField, as string) []bson.D {
+	return []bson.D{
+		GetLookupPipeline[T](localField, foreignField, as),
+		GetUnwindPipeline(as),
+	}
+}
+
+func GetDefaultLookupPipeline[T any]() bson.D {
+	var model T
+	typ := reflect.TypeOf(model)
+	name := utils.ToSnakeCase(typ.Name())
+	return GetLookupByNamePipeline[T](name)
+}
+
+func GetLookupByNamePipeline[T any](name string) bson.D {
+	localField := fmt.Sprintf("%s_id", name)
+	foreignField := "_id"
+	as := fmt.Sprintf("_%s", name)
+	return GetLookupPipeline[T](localField, foreignField, as)
+}
+
+func GetLookupPipeline[T any](localField, foreignField, as string) bson.D {
+	return bson.D{{
+		Key: "$lookup",
+		Value: bson.M{
+			"from":         GetCollectionName[T](),
+			"localField":   localField,
+			"foreignField": foreignField,
+			"as":           as,
+		}},
+	}
+}
+
+func GetDefaultUnwindPipeline[T any]() bson.D {
+	var model T
+	typ := reflect.TypeOf(model)
+	name := utils.ToSnakeCase(typ.Name())
+	as := fmt.Sprintf("_%s", name)
+	return GetUnwindPipeline(as)
+}
+
+func GetUnwindPipeline(as string) bson.D {
+	return bson.D{{
+		Key: "$unwind",
+		Value: bson.M{
+			"path":                       fmt.Sprintf("$%s", as),
+			"preserveNullAndEmptyArrays": true,
+		}},
+	}
+}
+
+func GetPaginationPipeline(query bson.M, sort bson.D, skip, limit int) []bson.D {
+	if query == nil {
+		query = bson.M{}
+	}
+	return []bson.D{
+		{{Key: "$match", Value: query}},
+		{{Key: "$sort", Value: sort}},
+		{{Key: "$skip", Value: skip}},
+		{{Key: "$limit", Value: limit}},
+	}
+}
+
+func GetByIdPipeline(id primitive.ObjectID) []bson.D {
+	return []bson.D{
+		{{Key: "$match", Value: bson.M{"_id": id}}},
+		{{Key: "$limit", Value: 1}},
+	}
 }

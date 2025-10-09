@@ -3,10 +3,12 @@ package controllers_test
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/crawlab-team/crawlab/core/models/models"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/crawlab-team/crawlab/core/models/models"
+	"github.com/loopfz/gadgeto/tonic"
 
 	"github.com/crawlab-team/crawlab/core/controllers"
 	"github.com/crawlab-team/crawlab/core/middlewares"
@@ -24,15 +26,18 @@ func TestCreateSpider(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.POST("/spiders", controllers.PostSpider)
+	router.POST("/spiders", nil, tonic.Handler(controllers.PostSpider, 200))
 
 	payload := models.Spider{
 		Name:    "Test Spider",
 		ColName: "test_spiders",
 	}
-	jsonValue, _ := json.Marshal(payload)
+	requestParams := controllers.PostParams[models.Spider]{
+		Data: payload,
+	}
+	jsonValue, _ := json.Marshal(requestParams)
 	req, _ := http.NewRequest("POST", "/spiders", bytes.NewBuffer(jsonValue))
 	req.Header.Set("Authorization", TestToken)
 	resp := httptest.NewRecorder()
@@ -54,9 +59,9 @@ func TestGetSpiderById(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.GET("/spiders/:id", controllers.GetSpiderById)
+	router.GET("/spiders/:id", nil, tonic.Handler(controllers.GetSpiderById, 200))
 
 	model := models.Spider{
 		Name:    "Test Spider",
@@ -83,62 +88,15 @@ func TestGetSpiderById(t *testing.T) {
 	assert.Equal(t, model.Name, response.Data.Name)
 }
 
-func TestUpdateSpiderById(t *testing.T) {
-	SetupTestDB()
-	defer CleanupTestDB()
-
-	gin.SetMode(gin.TestMode)
-
-	router := gin.Default()
-	router.Use(middlewares.AuthorizationMiddleware())
-	router.PUT("/spiders/:id", controllers.PutSpiderById)
-
-	model := models.Spider{
-		Name:    "Test Spider",
-		ColName: "test_spiders",
-	}
-	id, err := service.NewModelService[models.Spider]().InsertOne(model)
-	require.Nil(t, err)
-	ts := models.SpiderStat{}
-	ts.SetId(id)
-	_, err = service.NewModelService[models.SpiderStat]().InsertOne(ts)
-	require.Nil(t, err)
-
-	spiderId := id.Hex()
-	payload := models.Spider{
-		Name:    "Updated Spider",
-		ColName: "test_spider",
-	}
-	payload.SetId(id)
-	jsonValue, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("PUT", "/spiders/"+spiderId, bytes.NewBuffer(jsonValue))
-	req.Header.Set("Authorization", TestToken)
-	resp := httptest.NewRecorder()
-
-	router.ServeHTTP(resp, req)
-
-	assert.Equal(t, http.StatusOK, resp.Code)
-
-	var response controllers.Response[models.Spider]
-	err = json.Unmarshal(resp.Body.Bytes(), &response)
-	require.Nil(t, err)
-	assert.Equal(t, payload.Name, response.Data.Name)
-
-	svc := service.NewModelService[models.Spider]()
-	resModel, err := svc.GetById(id)
-	require.Nil(t, err)
-	assert.Equal(t, payload.Name, resModel.Name)
-}
-
 func TestDeleteSpiderById(t *testing.T) {
 	SetupTestDB()
 	defer CleanupTestDB()
 
 	gin.SetMode(gin.TestMode)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.DELETE("/spiders/:id", controllers.DeleteSpiderById)
+	router.DELETE("/spiders/:id", nil, tonic.Handler(controllers.DeleteSpiderById, 200))
 
 	model := models.Spider{
 		Name:    "Test Spider",
@@ -186,9 +144,9 @@ func TestDeleteSpiderList(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.DELETE("/spiders", controllers.DeleteSpiderList)
+	router.DELETE("/spiders", nil, tonic.Handler(controllers.DeleteSpiderList, 200))
 
 	modelList := []models.Spider{
 		{

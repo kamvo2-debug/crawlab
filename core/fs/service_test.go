@@ -42,7 +42,7 @@ func TestService_List(t *testing.T) {
 	// Use a map to verify presence and characteristics of files/directories to avoid order issues
 	items := make(map[string]bool)
 	for _, item := range files {
-		items[item.GetName()] = item.GetIsDir()
+		items[item.Name] = item.IsDir
 	}
 
 	_, file1Exists := items["file1.txt"]
@@ -55,8 +55,8 @@ func TestService_List(t *testing.T) {
 	assert.True(t, subdirExists)
 	assert.True(t, emptyExists) // Verify that the empty directory is included
 
-	if subdirExists && len(files[2].GetChildren()) > 0 {
-		assert.Equal(t, "file3.txt", files[2].GetChildren()[0].GetName())
+	if subdirExists && len(files[2].Children) > 0 {
+		assert.Equal(t, "file3.txt", files[2].Children[0].Name)
 	}
 }
 

@@ -3,23 +3,18 @@ package handler
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/crawlab-team/crawlab/core/dependency"
 	"github.com/crawlab-team/crawlab/core/fs"
-	"github.com/hashicorp/go-multierror"
-
 	"github.com/crawlab-team/crawlab/core/models/models"
+	"github.com/hashicorp/go-multierror"
 
 	"github.com/crawlab-team/crawlab/core/constants"
 	"github.com/crawlab-team/crawlab/core/entity"
@@ -51,6 +46,15 @@ func newTaskRunner(id primitive.ObjectID, svc *Service) (r *Runner, err error) {
 		ch:               make(chan constants.TaskSignal),
 		logBatchSize:     20,
 		Logger:           utils.NewLogger("TaskRunner"),
+		// treat all tasks as potentially long-running
+		maxConnRetries:      10,
+		connRetryDelay:      10 * time.Second,
+		ipcTimeout:          60 * time.Second, // generous timeout for all tasks
+		healthCheckInterval: 5 * time.Second,  // check process every 5 seconds
+		connHealthInterval:  60 * time.Second, // check connection health every minute
+		// initialize circuit breaker for log connections
+		logConnHealthy:         true,
+		logCircuitOpenDuration: 30 * time.Second, // keep circuit open for 30 seconds after failures
 	}
 
 	// multi error
@@ -71,9 +75,15 @@ func newTaskRunner(id primitive.ObjectID, svc *Service) (r *Runner, err error) {
 		}
 	}
 
-	// Initialize context and done channel
-	r.ctx, r.cancel = context.WithCancel(context.Background())
+	// Initialize context and done channel - use service context for proper cancellation chain
+	r.ctx, r.cancel = context.WithCancel(svc.ctx)
 	r.done = make(chan struct{})
+
+	// Initialize status cache for disconnection resilience
+	if err := r.initStatusCache(); err != nil {
+		r.Errorf("error initializing status cache: %v", err)
+		errs.Errors = append(errs.Errors, err)
+	}
 
 	// initialize task runner
 	if err := r.Init(); err != nil {
@@ -87,8 +97,8 @@ func newTaskRunner(id primitive.ObjectID, svc *Service) (r *Runner, err error) {
 // Runner represents a task execution handler that manages the lifecycle of a running task
 type Runner struct {
 	// dependencies
-	svc   *Service             // task handler service
-	fsSvc interfaces.FsService // task fs service
+	svc   *Service    // task handler service
+	fsSvc *fs.Service // task fs service
 
 	// settings
 	subscribeTimeout time.Duration // maximum time to wait for task subscription
@@ -122,6 +132,33 @@ type Runner struct {
 	cancel context.CancelFunc // function to cancel the context
 	done   chan struct{}      // channel to signal completion
 	wg     sync.WaitGroup     // wait group for goroutine synchronization
+
+	// connection management for robust task execution
+	connMutex         sync.RWMutex  // mutex for connection access
+	connHealthTicker  *time.Ticker  // ticker for connection health checks
+	lastConnCheck     time.Time     // last successful connection check
+	connRetryAttempts int           // current retry attempts
+	maxConnRetries    int           // maximum connection retry attempts
+	connRetryDelay    time.Duration // delay between connection retries
+	resourceCleanup   *time.Ticker  // periodic resource cleanup
+
+	// circuit breaker for log connections to prevent cascading failures
+	logConnHealthy         bool          // tracks if log connection is healthy
+	logConnMutex           sync.RWMutex  // mutex for log connection health state
+	lastLogSendFailure     time.Time     // last time log send failed
+	logCircuitOpenTime     time.Time     // when circuit breaker was opened
+	logFailureCount        int           // consecutive log send failures
+	logCircuitOpenDuration time.Duration // how long to keep circuit open after failures
+
+	// configurable timeouts for robust task execution
+	ipcTimeout          time.Duration // timeout for IPC operations
+	healthCheckInterval time.Duration // interval for health checks
+	connHealthInterval  time.Duration // interval for connection health checks
+
+	// status cache for disconnection resilience
+	statusCache      *TaskStatusCache     // local status cache that survives disconnections
+	pendingUpdates   []TaskStatusSnapshot // status updates to sync when reconnected
+	statusCacheMutex sync.RWMutex         // mutex for status cache operations
 }
 
 // Init initializes the task runner by updating the task status and establishing gRPC connections
@@ -198,13 +235,53 @@ func (r *Runner) Run() (err error) {
 	// Start IPC handler
 	go r.handleIPC()
 
+	// ZOMBIE PREVENTION: Start zombie process monitor
+	go r.startZombieMonitor()
+
 	// Ensure cleanup when Run() exits
 	defer func() {
-		_ = r.conn.CloseSend() // Close gRPC connection
-		r.cancel()             // Cancel context to stop all goroutines
-		r.wg.Wait()            // Wait for all goroutines to finish
-		close(r.done)          // Signal that everything is done
-		close(r.ipcChan)       // Close IPC channel
+		// 1. Signal all goroutines to stop
+		r.cancel()
+
+		// 2. Stop tickers to prevent resource leaks
+		if r.connHealthTicker != nil {
+			r.connHealthTicker.Stop()
+		}
+		if r.resourceCleanup != nil {
+			r.resourceCleanup.Stop()
+		}
+
+		// 3. Wait for all goroutines to finish with timeout
+		done := make(chan struct{})
+		go func() {
+			r.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// All goroutines finished normally
+		case <-time.After(10 * time.Second): // Increased timeout for long-running tasks
+			// Timeout waiting for goroutines, proceed with cleanup
+			r.Warnf("timeout waiting for goroutines to finish, proceeding with cleanup")
+		}
+
+		// 4. Close gRPC connection after all goroutines have stopped
+		r.connMutex.Lock()
+		if r.conn != nil {
+			_ = r.conn.CloseSend()
+			r.conn = nil
+		}
+		r.connMutex.Unlock()
+
+		// 5. Close channels after everything has stopped
+		close(r.done)
+		if r.ipcChan != nil {
+			close(r.ipcChan)
+		}
+
+		// 6. Clean up status cache for completed tasks
+		r.cleanupStatusCache()
 	}()
 
 	// wait for process to finish
@@ -214,31 +291,97 @@ func (r *Runner) Run() (err error) {
 // Cancel terminates the running task. If force is true, the process will be killed immediately
 // without waiting for graceful shutdown.
 func (r *Runner) Cancel(force bool) (err error) {
+	r.Debugf("attempting to cancel task (force: %v)", force)
+
 	// Signal goroutines to stop
 	r.cancel()
 
-	// Kill process
-	err = utils.KillProcess(r.cmd, force)
-	if err != nil {
-		r.Errorf("kill process error: %v", err)
-		return err
+	// Stop health check ticker immediately to prevent interference
+	if r.connHealthTicker != nil {
+		r.connHealthTicker.Stop()
+		r.Debugf("stopped connection health ticker")
 	}
-	r.Debugf("attempt to kill process[%d]", r.pid)
 
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), r.svc.GetCancelTimeout())
+	// Close gRPC connection to stop health check messages
+	r.connMutex.Lock()
+	if r.conn != nil {
+		_ = r.conn.CloseSend()
+		r.conn = nil
+		r.Debugf("closed gRPC connection to stop health checks")
+	}
+	r.connMutex.Unlock()
+
+	// Wait a moment for background goroutines to respond to cancellation signal
+	time.Sleep(100 * time.Millisecond)
+
+	// If force is not requested, try graceful termination first
+	if !force {
+		r.Debugf("attempting graceful termination of process[%d]", r.pid)
+		if err = utils.KillProcess(r.cmd, false); err != nil {
+			r.Warnf("graceful termination failed: %v, escalating to force", err)
+			force = true
+		} else {
+			// Wait for graceful termination with shorter timeout
+			ctx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
+			defer cancel()
+
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					r.Warnf("graceful termination timeout, escalating to force")
+					force = true
+					goto forceKill
+				case <-ticker.C:
+					if !utils.ProcessIdExists(r.pid) {
+						r.Debugf("process[%d] terminated gracefully", r.pid)
+						return nil
+					}
+				}
+			}
+		}
+	}
+
+forceKill:
+	if force {
+		r.Debugf("force killing process[%d]", r.pid)
+		if err = utils.KillProcess(r.cmd, true); err != nil {
+			r.Errorf("force kill failed: %v", err)
+			return err
+		}
+	}
+
+	// Wait for process to be killed with timeout
+	ctx, cancel := context.WithTimeout(r.ctx, r.svc.GetCancelTimeout())
 	defer cancel()
 
-	// Wait for process to be killed with context
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for task to stop")
+			r.Errorf("timeout waiting for task to stop after %v", r.svc.GetCancelTimeout())
+			// At this point, process might be completely stuck, log and return error
+			return fmt.Errorf("task cancellation timeout: process may be stuck")
 		case <-ticker.C:
 			if !utils.ProcessIdExists(r.pid) {
+				r.Debugf("process[%d] terminated successfully", r.pid)
+				// Wait for background goroutines to finish with timeout
+				done := make(chan struct{})
+				go func() {
+					r.wg.Wait()
+					close(done)
+				}()
+
+				select {
+				case <-done:
+					r.Debugf("all background goroutines stopped")
+				case <-time.After(5 * time.Second):
+					r.Warnf("some background goroutines did not stop within timeout")
+				}
 				return nil
 			}
 		}
@@ -253,66 +396,6 @@ func (r *Runner) GetTaskId() (id primitive.ObjectID) {
 	return r.tid
 }
 
-// configureCmd builds and configures the command to be executed, including setting up IPC pipes
-// and processing command parameters
-func (r *Runner) configureCmd() (err error) {
-	var cmdStr string
-
-	// command
-	if r.t.Cmd == "" {
-		cmdStr = r.s.Cmd
-	} else {
-		cmdStr = r.t.Cmd
-	}
-
-	// parameters
-	if r.t.Param != "" {
-		cmdStr += " " + r.t.Param
-	} else if r.s.Param != "" {
-		cmdStr += " " + r.s.Param
-	}
-
-	// get cmd instance
-	r.cmd, err = utils.BuildCmd(cmdStr)
-	if err != nil {
-		r.Errorf("error building command: %v", err)
-		return err
-	}
-
-	// set working directory
-	r.cmd.Dir = r.cwd
-
-	// Configure pipes for IPC and logs
-	r.stdinPipe, err = r.cmd.StdinPipe()
-	if err != nil {
-		r.Errorf("error creating stdin pipe: %v", err)
-		return err
-	}
-
-	// Add stdout pipe for IPC and logs
-	r.stdoutPipe, err = r.cmd.StdoutPipe()
-	if err != nil {
-		r.Errorf("error creating stdout pipe: %v", err)
-		return err
-	}
-
-	// Add stderr pipe for error logs
-	stderrPipe, err := r.cmd.StderrPipe()
-	if err != nil {
-		r.Errorf("error creating stderr pipe: %v", err)
-		return err
-	}
-
-	// Create buffered readers
-	r.readerStdout = bufio.NewReader(r.stdoutPipe)
-	r.readerStderr = bufio.NewReader(stderrPipe)
-
-	// Initialize IPC channel
-	r.ipcChan = make(chan entity.IPCMessage)
-
-	return nil
-}
-
 // startHealthCheck periodically verifies that the process is still running
 // If the process disappears unexpectedly, it signals a task lost condition
 func (r *Runner) startHealthCheck() {
@@ -323,7 +406,7 @@ func (r *Runner) startHealthCheck() {
 		return
 	}
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(r.healthCheckInterval)
 	defer ticker.Stop()
 
 	for {
@@ -338,280 +421,6 @@ func (r *Runner) startHealthCheck() {
 			}
 		}
 	}
-}
-
-// configureEnv sets up the environment variables for the task process, including:
-// - Python paths
-// - Node.js paths
-// - Go paths
-// - Crawlab-specific variables
-// - Global environment variables from the system
-func (r *Runner) configureEnv() {
-	// Start with the current environment
-	env := os.Environ()
-
-	// Create a map for easier manipulation and to avoid duplicates
-	envMap := make(map[string]string)
-	for _, e := range env {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
-			envMap[parts[0]] = parts[1]
-		}
-	}
-
-	// Handle PATH non-existence
-	if _, exists := envMap["PATH"]; !exists {
-		envMap["PATH"] = ""
-	}
-
-	// Configure Python path
-	pyenvRoot := utils.GetPyenvPath()
-	pyenvShimsPath := pyenvRoot + "/shims"
-	pyenvBinPath := pyenvRoot + "/bin"
-	envMap["PYENV_ROOT"] = pyenvRoot
-	if !strings.Contains(envMap["PATH"], pyenvShimsPath) {
-		envMap["PATH"] = pyenvShimsPath + ":" + envMap["PATH"]
-		r.Debugf("added pyenv shims path to PATH: %s", pyenvShimsPath)
-	}
-	if !strings.Contains(envMap["PATH"], pyenvBinPath) {
-		envMap["PATH"] = pyenvBinPath + ":" + envMap["PATH"]
-		r.Debugf("added pyenv bin path to PATH: %s", pyenvBinPath)
-	}
-
-	// Configure Node.js path
-	nodePath := utils.GetNodeModulesPath()
-	nodeBinPath := utils.GetNodeBinPath()
-	envMap["NODE_PATH"] = nodePath
-	if !strings.Contains(envMap["PATH"], nodePath) {
-		envMap["PATH"] = nodePath + ":" + envMap["PATH"]
-		r.Debugf("added node modules path to PATH: %s", nodePath)
-	}
-	if !strings.Contains(envMap["PATH"], nodeBinPath) {
-		envMap["PATH"] = nodeBinPath + ":" + envMap["PATH"]
-		r.Debugf("added node bin path to PATH: %s", nodeBinPath)
-	}
-
-	// Configure Go path
-	goPath := utils.GetGoPath()
-	if goPath != "" {
-		envMap["GOPATH"] = goPath
-		r.Debugf("set GOPATH: %s", goPath)
-	}
-
-	// Crawlab-specific variables
-	envMap["CRAWLAB_TASK_ID"] = r.tid.Hex()
-	envMap["CRAWLAB_PARENT_PID"] = fmt.Sprint(os.Getpid())
-
-	// Global environment variables
-	envs, err := client.NewModelService[models.Environment]().GetMany(nil, nil)
-	if err != nil {
-		r.Errorf("error getting environment variables: %v", err)
-		return
-	}
-	for _, env := range envs {
-		envMap[env.Key] = env.Value
-		r.Debugf("set environment variable: %s", env.Key)
-	}
-
-	// Convert the map back to the []string format for r.cmd.Env
-	r.cmd.Env = make([]string, 0, len(envMap))
-	for key, value := range envMap {
-		r.cmd.Env = append(r.cmd.Env, key+"="+value)
-	}
-
-	r.Debugf("environment configuration completed with %d variables", len(r.cmd.Env))
-}
-
-func (r *Runner) createHttpRequest(method, path string) (*http.Response, error) {
-	// Normalize path
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
-	}
-
-	// Construct master URL
-	var id string
-	if r.s.GitId.IsZero() {
-		id = r.s.Id.Hex()
-	} else {
-		id = r.s.GitId.Hex()
-	}
-	url := fmt.Sprintf("%s/sync/%s/%s", utils.GetApiEndpoint(), id, path)
-
-	// Create and execute request
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating request: %v", err)
-	}
-
-	for k, v := range r.getHttpRequestHeaders() {
-		req.Header.Set(k, v)
-	}
-
-	return http.DefaultClient.Do(req)
-}
-
-// syncFiles synchronizes files between master and worker nodes:
-// 1. Gets file list from master
-// 2. Compares with local files
-// 3. Downloads new/modified files
-// 4. Deletes files that no longer exist on master
-func (r *Runner) syncFiles() (err error) {
-	r.Infof("starting file synchronization for spider: %s", r.s.Id.Hex())
-
-	workingDir := ""
-	if !r.s.GitId.IsZero() {
-		workingDir = r.s.GitRootPath
-		r.Debugf("using git root path: %s", workingDir)
-	}
-
-	// get file list from master
-	r.Infof("fetching file list from master node")
-	resp, err := r.createHttpRequest("GET", "/scan?path="+workingDir)
-	if err != nil {
-		r.Errorf("error getting file list from master: %v", err)
-		return err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		r.Errorf("error reading response body: %v", err)
-		return err
-	}
-	var masterFiles map[string]entity.FsFileInfo
-	err = json.Unmarshal(body, &masterFiles)
-	if err != nil {
-		r.Errorf("error unmarshaling JSON for URL: %s", resp.Request.URL.String())
-		r.Errorf("error details: %v", err)
-		return err
-	}
-
-	// create a map for master files
-	masterFilesMap := make(map[string]entity.FsFileInfo)
-	for _, file := range masterFiles {
-		masterFilesMap[file.Path] = file
-	}
-
-	// create working directory if not exists
-	if _, err := os.Stat(r.cwd); os.IsNotExist(err) {
-		if err := os.MkdirAll(r.cwd, os.ModePerm); err != nil {
-			r.Errorf("error creating worker directory: %v", err)
-			return err
-		}
-	}
-
-	// get file list from worker
-	workerFiles, err := utils.ScanDirectory(r.cwd)
-	if err != nil {
-		r.Errorf("error scanning worker directory: %v", err)
-		return err
-	}
-
-	// delete files that are deleted on master node
-	for path, workerFile := range workerFiles {
-		if _, exists := masterFilesMap[path]; !exists {
-			r.Infof("deleting file: %s", path)
-			err := os.Remove(workerFile.FullPath)
-			if err != nil {
-				r.Errorf("error deleting file: %v", err)
-			}
-		}
-	}
-
-	// set up wait group and error channel
-	var wg sync.WaitGroup
-	pool := make(chan struct{}, 10)
-
-	// download files that are new or modified on master node
-	for path, masterFile := range masterFilesMap {
-		workerFile, exists := workerFiles[path]
-		if !exists || masterFile.Hash != workerFile.Hash {
-			wg.Add(1)
-
-			// acquire token
-			pool <- struct{}{}
-
-			// start goroutine to synchronize file or directory
-			go func(path string, masterFile *entity.FsFileInfo) {
-				defer wg.Done()
-
-				if masterFile.IsDir {
-					r.Infof("directory needs to be synchronized: %s", path)
-					_err := os.MkdirAll(filepath.Join(r.cwd, path), masterFile.Mode)
-					if _err != nil {
-						r.Errorf("error creating directory: %v", _err)
-						err = errors.Join(err, _err)
-					}
-				} else {
-					r.Infof("file needs to be synchronized: %s", path)
-					_err := r.downloadFile(path, filepath.Join(r.cwd, path), masterFile)
-					if _err != nil {
-						r.Errorf("error downloading file: %v", _err)
-						err = errors.Join(err, _err)
-					}
-				}
-
-				// release token
-				<-pool
-
-			}(path, &masterFile)
-		}
-	}
-
-	// wait for all files and directories to be synchronized
-	wg.Wait()
-
-	r.Infof("file synchronization completed successfully")
-	return err
-}
-
-// downloadFile downloads a file from the master node and saves it to the local file system
-func (r *Runner) downloadFile(path string, filePath string, fileInfo *entity.FsFileInfo) error {
-	r.Debugf("downloading file: %s -> %s", path, filePath)
-
-	resp, err := r.createHttpRequest("GET", "/download?path="+path)
-	if err != nil {
-		r.Errorf("error getting file response: %v", err)
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		r.Errorf("error downloading file: %s", resp.Status)
-		return errors.New(resp.Status)
-	}
-	defer resp.Body.Close()
-
-	// create directory if not exists
-	dirPath := filepath.Dir(filePath)
-	utils.Exists(dirPath)
-	err = os.MkdirAll(dirPath, os.ModePerm)
-	if err != nil {
-		r.Errorf("error creating directory: %v", err)
-		return err
-	}
-
-	// create local file
-	out, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileInfo.Mode)
-	if err != nil {
-		r.Errorf("error creating file: %v", err)
-		return err
-	}
-	defer out.Close()
-
-	// copy file content to local file
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		r.Errorf("error copying file: %v", err)
-		return err
-	}
-
-	r.Debugf("successfully downloaded file: %s (size: %d bytes)", path, fileInfo.FileSize)
-	return nil
-}
-
-// getHttpRequestHeaders returns the headers for HTTP requests to the master node
-func (r *Runner) getHttpRequestHeaders() (headers map[string]string) {
-	headers = make(map[string]string)
-	headers["Authorization"] = utils.GetAuthKey()
-	return headers
 }
 
 // wait monitors the process execution and sends appropriate signals based on the exit status:
@@ -668,6 +477,8 @@ func (r *Runner) wait() (err error) {
 	case constants.TaskSignalLost:
 		err = constants.ErrTaskLost
 		status = constants.TaskStatusError
+		// ZOMBIE PREVENTION: Clean up any remaining processes when task is lost
+		go r.cleanupOrphanedProcesses()
 	default:
 		err = constants.ErrInvalidSignal
 		status = constants.TaskStatusError
@@ -702,6 +513,9 @@ func (r *Runner) updateTask(status string, e error) (err error) {
 	}
 
 	if r.t != nil && status != "" {
+		// Cache status locally first (always succeeds)
+		r.cacheTaskStatus(status, e)
+
 		// update task status
 		r.t.Status = status
 		if e != nil {
@@ -710,18 +524,22 @@ func (r *Runner) updateTask(status string, e error) (err error) {
 		if utils.IsMaster() {
 			err = service.NewModelService[models.Task]().ReplaceById(r.t.Id, *r.t)
 			if err != nil {
-				return err
+				r.Warnf("failed to update task in database, but cached locally: %v", err)
+				// Don't return error - the status is cached and will be synced later
 			}
 		} else {
 			err = client.NewModelService[models.Task]().ReplaceById(r.t.Id, *r.t)
 			if err != nil {
-				return err
+				r.Warnf("failed to update task in database, but cached locally: %v", err)
+				// Don't return error - the status is cached and will be synced later
 			}
 		}
 
-		// update stats
-		r._updateTaskStat(status)
-		r._updateSpiderStat(status)
+		// update stats (only if database update succeeded)
+		if err == nil {
+			r.updateTaskStat(status)
+			r.updateSpiderStat(status)
+		}
 
 		// send notification
 		go r.sendNotification()
@@ -738,38 +556,201 @@ func (r *Runner) updateTask(status string, e error) (err error) {
 	return nil
 }
 
-// initConnection establishes a gRPC connection to the task service
+// initConnection establishes a gRPC connection to the task service with retry logic
 func (r *Runner) initConnection() (err error) {
-	r.conn, err = client2.GetGrpcClient().TaskClient.Connect(context.Background())
+	r.connMutex.Lock()
+	defer r.connMutex.Unlock()
+
+	taskClient, err := client2.GetGrpcClient().GetTaskClient()
+	if err != nil {
+		r.Errorf("failed to get task client: %v", err)
+		return err
+	}
+	r.conn, err = taskClient.Connect(r.ctx)
 	if err != nil {
 		r.Errorf("error connecting to task service: %v", err)
 		return err
 	}
+
+	r.lastConnCheck = time.Now()
+	r.connRetryAttempts = 0
+	// Start connection health monitoring for all tasks (potentially long-running)
+	go r.monitorConnectionHealth()
+
+	// Start periodic resource cleanup for all tasks
+	go r.performPeriodicCleanup()
+
 	return nil
 }
 
-// writeLogLines marshals log lines to JSON and sends them to the task service
-func (r *Runner) writeLogLines(lines []string) {
-	linesBytes, err := json.Marshal(lines)
-	if err != nil {
-		r.Errorf("error marshaling log lines: %v", err)
-		return
-	}
-	msg := &grpc.TaskServiceConnectRequest{
-		Code:   grpc.TaskServiceConnectCode_INSERT_LOGS,
-		TaskId: r.tid.Hex(),
-		Data:   linesBytes,
-	}
-	if err := r.conn.Send(msg); err != nil {
-		r.Errorf("error sending log lines: %v", err)
-		return
+// monitorConnectionHealth periodically checks gRPC connection health and reconnects if needed
+func (r *Runner) monitorConnectionHealth() {
+	r.wg.Add(1)
+	defer r.wg.Done()
+
+	r.connHealthTicker = time.NewTicker(r.connHealthInterval)
+	defer r.connHealthTicker.Stop()
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-r.connHealthTicker.C:
+			if r.isConnectionHealthy() {
+				r.lastConnCheck = time.Now()
+				r.connRetryAttempts = 0
+			} else {
+				r.Warnf("gRPC connection unhealthy, attempting reconnection (attempt %d/%d)",
+					r.connRetryAttempts+1, r.maxConnRetries)
+				if err := r.reconnectWithRetry(); err != nil {
+					r.Errorf("failed to reconnect after %d attempts: %v", r.maxConnRetries, err)
+				}
+			}
+		}
 	}
 }
 
-// _updateTaskStat updates task statistics based on the current status:
+// isConnectionHealthy checks if the gRPC connection is still healthy
+// Uses a non-blocking approach to prevent interfering with log streams
+func (r *Runner) isConnectionHealthy() bool {
+	r.connMutex.RLock()
+	conn := r.conn
+	r.connMutex.RUnlock()
+
+	if conn == nil {
+		return false
+	}
+
+	// Check if context is already cancelled - don't do health checks during cancellation
+	select {
+	case <-r.ctx.Done():
+		r.Debugf("skipping health check - task is being cancelled")
+		return false
+	default:
+	}
+
+	// FIXED: Use a completely non-blocking approach to prevent stream interference
+	// Instead of sending data that could block the log stream, just check connection state
+	// and use timing-based health assessment
+
+	// Check if we've had recent successful operations
+	timeSinceLastCheck := time.Since(r.lastConnCheck)
+
+	// If we haven't checked recently, consider it healthy if not too old
+	// This prevents health checks from interfering with active log streaming
+	if timeSinceLastCheck < 2*time.Minute {
+		r.Debugf("connection considered healthy based on recent activity")
+		return true
+	}
+
+	// For older connections, try a non-blocking ping only if no active log streaming
+	// This is a compromise to avoid blocking the critical log data flow
+	pingMsg := &grpc.TaskServiceConnectRequest{
+		Code:   grpc.TaskServiceConnectCode_PING,
+		TaskId: r.tid.Hex(),
+		Data:   nil,
+	}
+
+	// Use a very short timeout and non-blocking approach
+	done := make(chan error, 1)
+	go func() {
+		// Re-acquire lock only for the send operation
+		r.connMutex.RLock()
+		defer r.connMutex.RUnlock()
+		if r.conn != nil {
+			done <- r.conn.Send(pingMsg)
+		} else {
+			done <- fmt.Errorf("connection is nil")
+		}
+	}()
+
+	// Very short timeout to prevent blocking log operations
+	select {
+	case err := <-done:
+		if err != nil {
+			r.Debugf("connection health check failed: %v", err)
+			return false
+		}
+		r.Debugf("connection health check successful")
+		return true
+	case <-time.After(1 * time.Second): // Much shorter timeout
+		r.Debugf("connection health check timed out quickly - assume healthy to avoid blocking logs")
+		return true // Assume healthy to avoid disrupting log flow
+	case <-r.ctx.Done():
+		r.Debugf("connection health check cancelled")
+		return false
+	}
+}
+
+// reconnectWithRetry attempts to reconnect to the gRPC service with exponential backoff
+func (r *Runner) reconnectWithRetry() error {
+	r.connMutex.Lock()
+	defer r.connMutex.Unlock()
+
+	for attempt := 0; attempt < r.maxConnRetries; attempt++ {
+		r.connRetryAttempts = attempt + 1
+
+		// Close existing connection
+		if r.conn != nil {
+			_ = r.conn.CloseSend()
+			r.conn = nil
+		}
+
+		// Wait before retry (exponential backoff)
+		if attempt > 0 {
+			backoffDelay := time.Duration(attempt) * r.connRetryDelay
+			r.Debugf("waiting %v before retry attempt %d", backoffDelay, attempt+1)
+
+			select {
+			case <-r.ctx.Done():
+				return fmt.Errorf("context cancelled during reconnection")
+			case <-time.After(backoffDelay):
+			}
+		}
+
+		// Attempt reconnection
+		taskClient, err := client2.GetGrpcClient().GetTaskClient()
+		if err != nil {
+			r.Warnf("reconnection attempt %d failed to get task client: %v", attempt+1, err)
+			continue
+		}
+		conn, err := taskClient.Connect(r.ctx)
+		if err != nil {
+			r.Warnf("reconnection attempt %d failed: %v", attempt+1, err)
+			continue
+		}
+
+		r.conn = conn
+		r.lastConnCheck = time.Now()
+		r.connRetryAttempts = 0
+		r.Infof("successfully reconnected to task service after %d attempts", attempt+1)
+
+		// Reset log circuit breaker when connection is restored
+		r.logConnMutex.Lock()
+		if !r.logConnHealthy {
+			r.logConnHealthy = true
+			r.logFailureCount = 0
+			r.Logger.Info("log circuit breaker reset after successful reconnection")
+		}
+		r.logConnMutex.Unlock()
+
+		// Sync pending status updates after successful reconnection
+		go func() {
+			if err := r.syncPendingStatusUpdates(); err != nil {
+				r.Errorf("failed to sync pending status updates after reconnection: %v", err)
+			}
+		}()
+
+		return nil
+	}
+
+	return fmt.Errorf("failed to reconnect after %d attempts", r.maxConnRetries)
+}
+
+// updateTaskStat updates task statistics based on the current status:
 // - For running tasks: sets start time and wait duration
 // - For completed tasks: sets end time and calculates durations
-func (r *Runner) _updateTaskStat(status string) {
+func (r *Runner) updateTaskStat(status string) {
 	if status != "" {
 		r.Debugf("updating task statistics for status: %s", status)
 	}
@@ -786,16 +767,16 @@ func (r *Runner) _updateTaskStat(status string) {
 	case constants.TaskStatusPending:
 		// do nothing
 	case constants.TaskStatusRunning:
-		ts.StartTs = time.Now()
-		ts.WaitDuration = ts.StartTs.Sub(ts.CreatedAt).Milliseconds()
+		ts.StartedAt = time.Now()
+		ts.WaitDuration = ts.StartedAt.Sub(ts.CreatedAt).Milliseconds()
 	case constants.TaskStatusFinished, constants.TaskStatusError, constants.TaskStatusCancelled:
-		if ts.StartTs.IsZero() {
-			ts.StartTs = time.Now()
-			ts.WaitDuration = ts.StartTs.Sub(ts.CreatedAt).Milliseconds()
+		if ts.StartedAt.IsZero() {
+			ts.StartedAt = time.Now()
+			ts.WaitDuration = ts.StartedAt.Sub(ts.CreatedAt).Milliseconds()
 		}
-		ts.EndTs = time.Now()
-		ts.RuntimeDuration = ts.EndTs.Sub(ts.StartTs).Milliseconds()
-		ts.TotalDuration = ts.EndTs.Sub(ts.CreatedAt).Milliseconds()
+		ts.EndedAt = time.Now()
+		ts.RuntimeDuration = ts.EndedAt.Sub(ts.StartedAt).Milliseconds()
+		ts.TotalDuration = ts.EndedAt.Sub(ts.CreatedAt).Milliseconds()
 	}
 	if utils.IsMaster() {
 		err = service.NewModelService[models.TaskStat]().ReplaceById(ts.Id, *ts)
@@ -818,18 +799,31 @@ func (r *Runner) sendNotification() {
 		NodeKey: r.svc.GetNodeConfigService().GetNodeKey(),
 		TaskId:  r.tid.Hex(),
 	}
-	_, err := client2.GetGrpcClient().TaskClient.SendNotification(context.Background(), req)
+	taskClient, err := client2.GetGrpcClient().GetTaskClient()
 	if err != nil {
-		r.Errorf("error sending notification: %v", err)
+		r.Errorf("failed to get task client: %v", err)
+		return
+	}
+
+	// Use independent context for async notification - prevents cancellation due to task lifecycle
+	// This ensures notifications are sent even if the task runner is being cleaned up
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = taskClient.SendNotification(ctx, req)
+	if err != nil {
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			r.Errorf("error sending notification: %v", err)
+		}
 		return
 	}
 }
 
-// _updateSpiderStat updates spider statistics based on task completion:
+// updateSpiderStat updates spider statistics based on task completion:
 // - Updates last task ID
 // - Increments task counts
 // - Updates duration metrics
-func (r *Runner) _updateSpiderStat(status string) {
+func (r *Runner) updateSpiderStat(status string) {
 	// task stat
 	ts, err := client.NewModelService[models.TaskStat]().GetById(r.tid)
 	if err != nil {
@@ -877,183 +871,6 @@ func (r *Runner) _updateSpiderStat(status string) {
 		err = client.NewModelService[models.SpiderStat]().UpdateById(r.s.Id, update)
 		if err != nil {
 			r.Errorf("error updating spider stat: %v", err)
-			return
-		}
-	}
-}
-
-// configureCwd sets the working directory for the task based on the spider's configuration
-func (r *Runner) configureCwd() {
-	workspacePath := utils.GetWorkspace()
-	if r.s.GitId.IsZero() {
-		// not git
-		r.cwd = filepath.Join(workspacePath, r.s.Id.Hex())
-	} else {
-		// git
-		r.cwd = filepath.Join(workspacePath, r.s.GitId.Hex(), r.s.GitRootPath)
-	}
-}
-
-// handleIPC processes incoming IPC messages from the child process
-// Messages are converted to JSON and written to the child process's stdin
-func (r *Runner) handleIPC() {
-	for msg := range r.ipcChan {
-		// Convert message to JSON
-		jsonData, err := json.Marshal(msg)
-		if err != nil {
-			r.Errorf("error marshaling IPC message: %v", err)
-			continue
-		}
-
-		// Write to child process's stdin
-		_, err = fmt.Fprintln(r.stdinPipe, string(jsonData))
-		if err != nil {
-			r.Errorf("error writing to child process: %v", err)
-		}
-	}
-}
-
-// SetIPCHandler sets the handler for incoming IPC messages
-func (r *Runner) SetIPCHandler(handler func(entity.IPCMessage)) {
-	r.ipcHandler = handler
-}
-
-// startIPCReader continuously reads IPC messages from the child process's stdout
-// Messages are parsed and either handled by the IPC handler or written to logs
-func (r *Runner) startIPCReader() {
-	r.wg.Add(2) // Add 2 to wait group for both stdout and stderr readers
-
-	// Start stdout reader
-	go func() {
-		defer r.wg.Done()
-		r.readOutput(r.readerStdout, true) // true for stdout
-	}()
-
-	// Start stderr reader
-	go func() {
-		defer r.wg.Done()
-		r.readOutput(r.readerStderr, false) // false for stderr
-	}()
-}
-
-func (r *Runner) readOutput(reader *bufio.Reader, isStdout bool) {
-	scanner := bufio.NewScanner(reader)
-	for {
-		select {
-		case <-r.ctx.Done():
-			// Context cancelled, stop reading
-			return
-		default:
-			// Scan the next line
-			if !scanner.Scan() {
-				return
-			}
-
-			// Get the line
-			line := scanner.Text()
-
-			// Trim the line
-			line = strings.TrimRight(line, "\n\r")
-
-			// For stdout, try to parse as IPC message first
-			if isStdout {
-				var ipcMsg entity.IPCMessage
-				if err := json.Unmarshal([]byte(line), &ipcMsg); err == nil && ipcMsg.IPC {
-					if r.ipcHandler != nil {
-						r.ipcHandler(ipcMsg)
-					} else {
-						// Default handler (insert data)
-						if ipcMsg.Type == "" || ipcMsg.Type == constants.IPCMessageData {
-							r.handleIPCInsertDataMessage(ipcMsg)
-						} else {
-							r.Warnf("no IPC handler set for message: %v", ipcMsg)
-						}
-					}
-					continue
-				}
-			}
-
-			// If not an IPC message or from stderr, treat as log
-			r.writeLogLines([]string{line})
-		}
-	}
-}
-
-// handleIPCInsertDataMessage converts the IPC message payload to JSON and sends it to the master node
-func (r *Runner) handleIPCInsertDataMessage(ipcMsg entity.IPCMessage) {
-	if ipcMsg.Payload == nil {
-		r.Errorf("empty payload in IPC message")
-		return
-	}
-
-	// Convert payload to data to be inserted
-	var records []map[string]interface{}
-
-	switch payload := ipcMsg.Payload.(type) {
-	case []interface{}: // Handle array of objects
-		records = make([]map[string]interface{}, 0, len(payload))
-		for i, item := range payload {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				records = append(records, itemMap)
-			} else {
-				r.Errorf("invalid record at index %d: %v", i, item)
-				continue
-			}
-		}
-	case []map[string]interface{}: // Handle direct array of maps
-		records = payload
-	case map[string]interface{}: // Handle single object
-		records = []map[string]interface{}{payload}
-	case interface{}: // Handle generic interface
-		if itemMap, ok := payload.(map[string]interface{}); ok {
-			records = []map[string]interface{}{itemMap}
-		} else {
-			r.Errorf("invalid payload type: %T", payload)
-			return
-		}
-	default:
-		r.Errorf("unsupported payload type: %T, value: %v", payload, ipcMsg.Payload)
-		return
-	}
-
-	// Validate records
-	if len(records) == 0 {
-		r.Warnf("no valid records to insert")
-		return
-	}
-
-	// Marshal data with error handling
-	data, err := json.Marshal(records)
-	if err != nil {
-		r.Errorf("error marshaling records: %v", err)
-		return
-	}
-
-	// Validate connection
-	if r.conn == nil {
-		r.Errorf("gRPC connection not initialized")
-		return
-	}
-
-	// Send IPC message to master with context and timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Create gRPC message
-	grpcMsg := &grpc.TaskServiceConnectRequest{
-		Code:   grpc.TaskServiceConnectCode_INSERT_DATA,
-		TaskId: r.tid.Hex(),
-		Data:   data,
-	}
-
-	// Use context for sending
-	select {
-	case <-ctx.Done():
-		r.Errorf("timeout sending IPC message")
-		return
-	default:
-		if err := r.conn.Send(grpcMsg); err != nil {
-			r.Errorf("error sending IPC message: %v", err)
 			return
 		}
 	}
@@ -1142,71 +959,16 @@ func (r *Runner) installDependenciesIfAvailable() (err error) {
 	return nil
 }
 
-// logInternally sends internal runner logs to the same logging system as the task
-func (r *Runner) logInternally(level string, message string) {
-	// Format the internal log with a prefix
-	timestamp := time.Now().Local().Format("2006-01-02 15:04:05")
+// GetConnectionStats returns connection health statistics for monitoring
+func (r *Runner) GetConnectionStats() map[string]interface{} {
+	r.connMutex.RLock()
+	defer r.connMutex.RUnlock()
 
-	// Pad level
-	level = fmt.Sprintf("%-5s", level)
-
-	// Format the log message
-	internalLog := fmt.Sprintf("%s [%s] [%s] %s", level, timestamp, "Crawlab", message)
-
-	// Send to the same log system as task logs
-	if r.conn != nil {
-		r.writeLogLines([]string{internalLog})
+	return map[string]interface{}{
+		"last_connection_check": r.lastConnCheck,
+		"retry_attempts":        r.connRetryAttempts,
+		"max_retries":           r.maxConnRetries,
+		"connection_healthy":    r.isConnectionHealthy(),
+		"connection_exists":     r.conn != nil,
 	}
-
-	// Also log through the standard logger
-	switch level {
-	case "ERROR":
-		r.Logger.Error(message)
-	case "WARN":
-		r.Logger.Warn(message)
-	case "INFO":
-		r.Logger.Info(message)
-	case "DEBUG":
-		r.Logger.Debug(message)
-	}
-}
-
-func (r *Runner) Error(message string) {
-	msg := fmt.Sprintf(message)
-	r.logInternally("ERROR", msg)
-}
-
-func (r *Runner) Warn(message string) {
-	msg := fmt.Sprintf(message)
-	r.logInternally("WARN", msg)
-}
-
-func (r *Runner) Info(message string) {
-	msg := fmt.Sprintf(message)
-	r.logInternally("INFO", msg)
-}
-
-func (r *Runner) Debug(message string) {
-	msg := fmt.Sprintf(message)
-	r.logInternally("DEBUG", msg)
-}
-
-func (r *Runner) Errorf(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	r.logInternally("ERROR", msg)
-}
-
-func (r *Runner) Warnf(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	r.logInternally("WARN", msg)
-}
-
-func (r *Runner) Infof(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	r.logInternally("INFO", msg)
-}
-
-func (r *Runner) Debugf(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	r.logInternally("DEBUG", msg)
 }

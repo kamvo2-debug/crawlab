@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	mongo3 "github.com/crawlab-team/crawlab/core/mongo"
 	"io"
 	"strings"
 	"sync"
+	"time"
+
+	mongo3 "github.com/crawlab-team/crawlab/core/mongo"
 
 	"github.com/crawlab-team/crawlab/core/constants"
 	"github.com/crawlab-team/crawlab/core/interfaces"
@@ -35,6 +37,11 @@ type TaskServiceServer struct {
 
 	// internals
 	subs map[primitive.ObjectID]grpc.TaskService_SubscribeServer
+
+	// cleanup mechanism
+	cleanupCtx    context.Context
+	cleanupCancel context.CancelFunc
+
 	interfaces.Logger
 }
 
@@ -50,21 +57,53 @@ func (svr TaskServiceServer) Subscribe(req *grpc.TaskServiceSubscribeRequest, st
 		return errors.New("invalid stream")
 	}
 
-	// add stream
+	svr.Infof("task stream opened: %s", taskId.Hex())
+
+	// Create a context based on client stream
+	ctx := stream.Context()
+
+	// add stream and track cancellation function
 	taskServiceMutex.Lock()
 	svr.subs[taskId] = stream
 	taskServiceMutex.Unlock()
 
-	// wait for stream to close
-	<-stream.Context().Done()
+	// ensure cleanup on exit
+	defer func() {
+		taskServiceMutex.Lock()
+		delete(svr.subs, taskId)
+		taskServiceMutex.Unlock()
+		svr.Infof("task stream closed: %s", taskId.Hex())
+	}()
 
-	// remove stream
-	taskServiceMutex.Lock()
-	delete(svr.subs, taskId)
-	taskServiceMutex.Unlock()
-	svr.Infof("task stream closed: %s", taskId.Hex())
+	// send periodic heartbeat to detect client disconnection and check for task completion
+	heartbeatTicker := time.NewTicker(10 * time.Second) // More frequent for faster completion detection
+	defer heartbeatTicker.Stop()
 
-	return nil
+	for {
+		select {
+		case <-ctx.Done():
+			// Stream context cancelled normally (client disconnected or task finished)
+			svr.Debugf("task stream context done: %s", taskId.Hex())
+			return ctx.Err()
+
+		case <-heartbeatTicker.C:
+			// Check if task has finished and close stream if so
+			if svr.isTaskFinished(taskId) {
+				svr.Infof("task[%s] finished, closing stream", taskId.Hex())
+				return nil
+			}
+
+			// Check if the context is still valid
+			select {
+			case <-ctx.Done():
+				svr.Debugf("task stream context cancelled during heartbeat check: %s", taskId.Hex())
+				return ctx.Err()
+			default:
+				// Context is still valid, continue
+				svr.Debugf("task stream heartbeat check passed: %s", taskId.Hex())
+			}
+		}
+	}
 }
 
 // Connect to task stream when a task runner in a node starts
@@ -75,22 +114,49 @@ func (svr TaskServiceServer) Connect(stream grpc.TaskService_ConnectServer) (err
 	var spiderId primitive.ObjectID
 	var taskId primitive.ObjectID
 
+	// Add timeout protection for the entire connection
+	ctx := stream.Context()
+
+	// Log connection start
+	svr.Debugf("task connect stream started")
+
+	defer func() {
+		if taskId != primitive.NilObjectID {
+			svr.Debugf("task connect stream ended for task: %s", taskId.Hex())
+		} else {
+			svr.Debugf("task connect stream ended")
+		}
+	}()
+
 	// continuously receive messages from the stream
 	for {
-		// receive next message from stream
+		// Check context cancellation before each receive
+		select {
+		case <-ctx.Done():
+			svr.Debugf("task connect stream context cancelled")
+			return ctx.Err()
+		default:
+		}
+
+		// receive next message from stream with timeout
 		msg, err := stream.Recv()
 		if err == io.EOF {
 			// stream has ended normally
+			svr.Debugf("task connect stream ended normally (EOF)")
 			return nil
 		}
 		if err != nil {
 			// handle graceful context cancellation
-			if strings.HasSuffix(err.Error(), "context canceled") {
+			if strings.HasSuffix(err.Error(), "context canceled") ||
+				strings.Contains(err.Error(), "context deadline exceeded") ||
+				strings.Contains(err.Error(), "transport is closing") {
+				svr.Debugf("task connect stream cancelled gracefully: %v", err)
 				return nil
 			}
-			// log other stream receive errors and continue
+			// log other stream receive errors
 			svr.Errorf("error receiving stream message: %v", err)
-			continue
+			// Return error instead of continuing to prevent infinite error loops
+			return err
 		}
 
 		// validate and parse the task ID from the message if not already set
@@ -100,6 +166,7 @@ func (svr TaskServiceServer) Connect(stream grpc.TaskService_ConnectServer) (err
 				svr.Errorf("invalid task id: %s", msg.TaskId)
 				continue
 			}
+			svr.Debugf("task connect stream set task id: %s", taskId.Hex())
 		}
 
 		// get spider id if not already set
@@ -121,6 +188,10 @@ func (svr TaskServiceServer) Connect(stream grpc.TaskService_ConnectServer) (err
 		case grpc.TaskServiceConnectCode_INSERT_LOGS:
 			// handle task log insertion
 			err = svr.handleInsertLogs(taskId, msg)
+		case grpc.TaskServiceConnectCode_PING:
+			// handle connection health check ping - no action needed, just acknowledge
+			svr.Debugf("received ping from task[%s]", taskId.Hex())
+			err = nil
 		default:
 			// invalid message code received
 			svr.Errorf("invalid stream message code: %d", msg.Code)
@@ -149,8 +220,8 @@ func (svr TaskServiceServer) FetchTask(ctx context.Context, request *grpc.TaskSe
 	var tid primitive.ObjectID
 	opts := &mongo3.FindOptions{
 		Sort: bson.D{
-			{"priority", 1},
-			{"_id", 1},
+			{Key: "priority", Value: 1},
+			{Key: "_id", Value: 1},
 		},
 		Limit: 1,
 	}
@@ -193,9 +264,12 @@ func (svr TaskServiceServer) FetchTask(ctx context.Context, request *grpc.TaskSe
 	return &grpc.TaskServiceFetchTaskResponse{TaskId: tid.Hex()}, nil
 }
 
-func (svr TaskServiceServer) SendNotification(_ context.Context, request *grpc.TaskServiceSendNotificationRequest) (response *grpc.Response, err error) {
+func (svr TaskServiceServer) SendNotification(_ context.Context, request *grpc.TaskServiceSendNotificationRequest) (response *grpc.TaskServiceSendNotificationResponse, err error) {
 	if !utils.IsPro() {
-		return nil, nil
+		return &grpc.TaskServiceSendNotificationResponse{
+			Code:    grpc.TaskServiceSendNotificationResponseCode_NOTIFICATION_DISABLED,
+			Message: "Notification service is disabled (Pro version required)",
+		}, nil
 	}
 
 	// task id
@@ -292,7 +366,91 @@ func (svr TaskServiceServer) SendNotification(_ context.Context, request *grpc.T
 		}
 	}
 
-	return nil, nil
+	return &grpc.TaskServiceSendNotificationResponse{
+		Code:    grpc.TaskServiceSendNotificationResponseCode_NOTIFICATION_SUCCESS,
+		Message: "Notification sent successfully",
+	}, nil
+}
+
+func (svr TaskServiceServer) CheckProcess(_ context.Context, request *grpc.TaskServiceCheckProcessRequest) (response *grpc.TaskServiceCheckProcessResponse, err error) {
+	// Validate request
+	_, err = primitive.ObjectIDFromHex(request.TaskId)
+	if err != nil {
+		svr.Errorf("invalid task id: %s", request.TaskId)
+		return &grpc.TaskServiceCheckProcessResponse{
+			TaskId:       request.TaskId,
+			Pid:          request.Pid,
+			Status:       grpc.ProcessStatus_PROCESS_UNKNOWN,
+			ErrorMessage: "invalid task id",
+		}, nil
+	}
+
+	pid := int(request.Pid)
+	if pid <= 0 {
+		return &grpc.TaskServiceCheckProcessResponse{
+			TaskId:       request.TaskId,
+			Pid:          request.Pid,
+			Status:       grpc.ProcessStatus_PROCESS_NOT_FOUND,
+			ErrorMessage: "invalid process id",
+		}, nil
+	}
+
+	// Check if process exists
+	processExists := utils.ProcessIdExists(pid)
+	if !processExists {
+		return &grpc.TaskServiceCheckProcessResponse{
+			TaskId:   request.TaskId,
+			Pid:      request.Pid,
+			Status:   grpc.ProcessStatus_PROCESS_NOT_FOUND,
+			ExitCode: -1,
+		}, nil
+	}
+
+	// Get process details using gopsutil
+	processStatus, exitCode, errMsg := svr.getProcessDetails(pid)
+
+	return &grpc.TaskServiceCheckProcessResponse{
+		TaskId:       request.TaskId,
+		Pid:          request.Pid,
+		Status:       processStatus,
+		ExitCode:     int32(exitCode),
+		ErrorMessage: errMsg,
+	}, nil
+}
+
+// getProcessDetails queries the process details using gopsutil
+func (svr TaskServiceServer) getProcessDetails(pid int) (status grpc.ProcessStatus, exitCode int, errorMessage string) {
+	// Import the gopsutil process package
+	processLib, err := utils.GetProcesses()
+	if err != nil {
+		return grpc.ProcessStatus_PROCESS_UNKNOWN, -1, fmt.Sprintf("failed to get processes: %v", err)
+	}
+
+	// Find the specific process
+	for _, p := range processLib {
+		if int(p.Pid) == pid {
+			// Get process status
+			processStatus, err := p.Status()
+			if err != nil {
+				return grpc.ProcessStatus_PROCESS_UNKNOWN, -1, fmt.Sprintf("failed to get process status: %v", err)
+			}
+
+			// Map process status to our enum
+			switch strings.ToLower(processStatus) {
+			case "running", "sleep", "disk-sleep":
+				return grpc.ProcessStatus_PROCESS_RUNNING, 0, ""
+			case "zombie":
+				return grpc.ProcessStatus_PROCESS_ZOMBIE, 0, "process is zombie"
+			case "stopped", "tracing-stop":
+				return grpc.ProcessStatus_PROCESS_FINISHED, 0, "process stopped"
+			default:
+				return grpc.ProcessStatus_PROCESS_UNKNOWN, -1, fmt.Sprintf("unknown process status: %s", processStatus)
+			}
+		}
+	}
+
+	// Process not found
+	return grpc.ProcessStatus_PROCESS_NOT_FOUND, -1, "process not found"
 }
 
 func (svr TaskServiceServer) GetSubscribeStream(taskId primitive.ObjectID) (stream grpc.TaskService_SubscribeServer, ok bool) {
@@ -300,6 +458,51 @@ func (svr TaskServiceServer) GetSubscribeStream(taskId primitive.ObjectID) (stre
 	defer taskServiceMutex.Unlock()
 	stream, ok = svr.subs[taskId]
 	return stream, ok
+}
+
+// cleanupStaleStreams periodically checks for and removes stale streams
+func (svr TaskServiceServer) cleanupStaleStreams() {
+	ticker := time.NewTicker(10 * time.Minute) // Check every 10 minutes
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-svr.cleanupCtx.Done():
+			svr.Debugf("stream cleanup routine shutting down")
+			return
+		case <-ticker.C:
+			svr.performStreamCleanup()
+		}
+	}
+}
+
+// performStreamCleanup checks each stream and removes those that are no longer active
+func (svr TaskServiceServer) performStreamCleanup() {
+	taskServiceMutex.Lock()
+	defer taskServiceMutex.Unlock()
+
+	var staleTaskIds []primitive.ObjectID
+
+	for taskId, stream := range svr.subs {
+		// Check if stream context is still active
+		select {
+		case <-stream.Context().Done():
+			// Stream is done, mark for removal
+			staleTaskIds = append(staleTaskIds, taskId)
+		default:
+			// Stream is still active, continue
+		}
+	}
+
+	// Remove stale streams
+	for _, taskId := range staleTaskIds {
+		delete(svr.subs, taskId)
+		svr.Infof("cleaned up stale stream for task: %s", taskId.Hex())
+	}
+
+	if len(staleTaskIds) > 0 {
+		svr.Infof("cleaned up %d stale streams", len(staleTaskIds))
+	}
 }
 
 func (svr TaskServiceServer) handleInsertData(taskId, spiderId primitive.ObjectID, msg *grpc.TaskServiceConnectRequest) (err error) {
@@ -332,12 +535,58 @@ func (svr TaskServiceServer) saveTask(t *models.Task) (err error) {
 }
 
 func newTaskServiceServer() *TaskServiceServer {
-	return &TaskServiceServer{
-		cfgSvc:   nodeconfig.GetNodeConfigService(),
-		subs:     make(map[primitive.ObjectID]grpc.TaskService_SubscribeServer),
-		statsSvc: stats.GetTaskStatsService(),
-		Logger:   utils.NewLogger("GrpcTaskServiceServer"),
+	ctx, cancel := context.WithCancel(context.Background())
+
+	server := &TaskServiceServer{
+		cfgSvc:        nodeconfig.GetNodeConfigService(),
+		subs:          make(map[primitive.ObjectID]grpc.TaskService_SubscribeServer),
+		statsSvc:      stats.GetTaskStatsService(),
+		cleanupCtx:    ctx,
+		cleanupCancel: cancel,
+		Logger:        utils.NewLogger("GrpcTaskServiceServer"),
 	}
+
+	// Start the cleanup routine
+	go server.cleanupStaleStreams()
+
+	return server
+}
+
+// Stop gracefully shuts down the task service server
+func (svr TaskServiceServer) Stop() error {
+	svr.Infof("stopping task service server...")
+
+	// Cancel cleanup routine
+	if svr.cleanupCancel != nil {
+		svr.cleanupCancel()
+	}
+
+	// Clean up all remaining streams
+	taskServiceMutex.Lock()
+	streamCount := len(svr.subs)
+	for taskId := range svr.subs {
+		delete(svr.subs, taskId)
+	}
+	taskServiceMutex.Unlock()
+
+	if streamCount > 0 {
+		svr.Infof("cleaned up %d remaining streams on shutdown", streamCount)
+	}
+
+	svr.Infof("task service server stopped")
+	return nil
+}
+
+// isTaskFinished checks if a task has completed execution
+func (svr TaskServiceServer) isTaskFinished(taskId primitive.ObjectID) bool {
+	task, err := service.NewModelService[models.Task]().GetById(taskId)
+	if err != nil {
+		svr.Debugf("error checking task[%s] status: %v", taskId.Hex(), err)
+		return false
+	}
+
+	// Task is finished if it's not in pending or running state
+	return task.Status != constants.TaskStatusPending && task.Status != constants.TaskStatusRunning
 }
 
 var _taskServiceServer *TaskServiceServer

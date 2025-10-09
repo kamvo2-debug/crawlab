@@ -32,9 +32,7 @@ func ToSnakeCase(s string) string {
 }
 
 func ToPascalCase(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, "_", " ")
-	s = cases.Title(language.English).String(s)
+	s = Capitalize(s)
 	s = strings.ReplaceAll(s, " ", "")
 	return s
 }
@@ -43,6 +41,15 @@ func ToKebabCase(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.ToLower(s)
 	return replaceChars(s, []string{" ", "_", "."}, "-")
+}
+
+func Capitalize(s string) string {
+	s = strings.TrimSpace(s)
+	for _, char := range []string{" ", "_", "-", "/"} {
+		s = strings.ReplaceAll(s, char, " ")
+	}
+	s = cases.Title(language.English).String(s)
+	return s
 }
 
 // splitStringWithQuotes splits a string with quotes

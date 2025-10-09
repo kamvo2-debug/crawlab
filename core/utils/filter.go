@@ -1,19 +1,19 @@
 package utils
 
 import (
-	errors2 "errors"
 	"github.com/crawlab-team/crawlab/core/constants"
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
 // FilterToQuery Translate entity.Filter to bson.M
-func FilterToQuery(f interfaces.Filter) (q bson.M, err error) {
+func FilterToQuery(f interfaces.Filter) (q bson.M) {
+	q = bson.M{}
+
 	if f == nil || f.IsNil() {
-		return nil, nil
+		return q
 	}
 
-	q = bson.M{}
 	for _, cond := range f.GetConditions() {
 		key := cond.GetKey()
 		op := cond.GetOp()
@@ -25,9 +25,9 @@ func FilterToQuery(f interfaces.Filter) (q bson.M, err error) {
 			q[key] = cond.GetValue()
 		case constants.FilterOpNotEqual:
 			q[key] = bson.M{"$ne": value}
-		case constants.FilterOpContains, constants.FilterOpRegex, constants.FilterOpSearch:
+		case constants.FilterOpContains, constants.FilterOpContainsShort, constants.FilterOpRegex, constants.FilterOpSearch, constants.FilterOpSearchShort:
 			q[key] = bson.M{"$regex": value, "$options": "i"}
-		case constants.FilterOpNotContains:
+		case constants.FilterOpNotContains, constants.FilterOpNotContainsShort:
 			q[key] = bson.M{"$not": bson.M{"$regex": value}}
 		case constants.FilterOpIn:
 			q[key] = bson.M{"$in": value}
@@ -42,8 +42,9 @@ func FilterToQuery(f interfaces.Filter) (q bson.M, err error) {
 		case constants.FilterOpLessThanEqual:
 			q[key] = bson.M{"$lte": value}
 		default:
-			return nil, errors2.New("invalid operation")
+			// ignore invalid operation
 		}
 	}
-	return q, nil
+
+	return q
 }

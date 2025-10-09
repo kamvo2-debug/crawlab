@@ -4,7 +4,6 @@ import (
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/robfig/cron/v3"
-	"strings"
 )
 
 type CronLogger struct {
@@ -12,21 +11,11 @@ type CronLogger struct {
 }
 
 func (l *CronLogger) Info(msg string, keysAndValues ...interface{}) {
-	p := l.getPlaceholder(len(keysAndValues))
-	l.Infof("cron: %s %s", msg, p)
+	l.Infof("%s %v", msg, keysAndValues)
 }
 
 func (l *CronLogger) Error(err error, msg string, keysAndValues ...interface{}) {
-	p := l.getPlaceholder(len(keysAndValues))
-	l.Errorf("cron: %s %v %s", msg, err, p)
-}
-
-func (l *CronLogger) getPlaceholder(n int) (s string) {
-	var arr []string
-	for i := 0; i < n; i++ {
-		arr = append(arr, "%v")
-	}
-	return strings.Join(arr, " ")
+	l.Errorf("%s %v %v", msg, err, keysAndValues)
 }
 
 func NewCronLogger() cron.Logger {

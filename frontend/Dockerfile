@@ -12,7 +12,12 @@ WORKDIR /app
 RUN npm install -g pnpm
 
 # Copy application code
-ADD . .
+ADD ./crawlab-ui /app
+
+# Debug: List files to verify they're correctly copied
+RUN ls -la /app/src/
+RUN ls -la /app/src/components/
+RUN ls -la /app/src/components/ui/ || echo "UI directory not found"
 
 # Install project dependencies
 RUN pnpm install
@@ -24,4 +29,4 @@ RUN pnpm run build
 FROM alpine:3.14
 
 # Copy only the built artifacts from the build stage
-COPY --from=build /app/apps/crawlab/dist /app/dist
+COPY --from=build /app/dist /app/dist

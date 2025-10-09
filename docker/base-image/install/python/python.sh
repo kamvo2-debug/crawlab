@@ -15,6 +15,9 @@ print_usage() {
 
 # Function to install Python dependencies
 install_dependencies() {
+	# Update package lists
+	apt-get update -y
+	
 	apt install -y \
 		make \
 		build-essential \

@@ -1,6 +1,8 @@
 package controllers_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +14,7 @@ import (
 	"github.com/crawlab-team/crawlab/core/models/models"
 	"github.com/crawlab-team/crawlab/core/models/service"
 	"github.com/crawlab-team/crawlab/core/user"
-	"github.com/gin-gonic/gin"
+	"github.com/loopfz/gadgeto/tonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
@@ -36,9 +38,9 @@ func TestGetUserById_Success(t *testing.T) {
 	require.Nil(t, err)
 	u.SetId(id)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.GET("/users/:id", controllers.GetUserById)
+	router.GET("/users/:id", nil, tonic.Handler(controllers.GetUserById, 200))
 
 	// Test valid ID
 	req, err := http.NewRequest(http.MethodGet, "/users/"+id.Hex(), nil)
@@ -79,9 +81,9 @@ func TestGetUserList_Success(t *testing.T) {
 		assert.Nil(t, err)
 	}
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.GET("/users", controllers.GetUserList)
+	router.GET("/users", nil, tonic.Handler(controllers.GetUserList, 200))
 
 	// Test default pagination
 	req, err := http.NewRequest(http.MethodGet, "/users", nil)
@@ -108,9 +110,9 @@ func TestPostUser_Success(t *testing.T) {
 	SetupTestDB()
 	defer CleanupTestDB()
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.POST("/users", controllers.PostUser)
+	router.POST("/users", nil, tonic.Handler(controllers.PostUser, 200))
 
 	// Test creating a new user with valid data
 	reqBody := strings.NewReader(`{
@@ -148,7 +150,7 @@ func TestPostUser_Success(t *testing.T) {
 
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equalf(t, http.StatusBadRequest, w.Code, w.Body.String())
 }
 
 func TestPutUserById_Success(t *testing.T) {
@@ -161,9 +163,9 @@ func TestPutUserById_Success(t *testing.T) {
 	require.Nil(t, err)
 	u.SetId(id)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.PUT("/users/:id", controllers.PutUserById)
+	router.PUT("/users/:id", nil, tonic.Handler(controllers.PutUserById, 200))
 
 	// Test case 1: Regular user update
 	reqBody := strings.NewReader(`{
@@ -214,9 +216,9 @@ func TestPostUserChangePassword_Success(t *testing.T) {
 	require.Nil(t, err)
 	u.SetId(id)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.POST("/users/:id/change-password", controllers.PostUserChangePassword)
+	router.POST("/users/:id/change-password", nil, tonic.Handler(controllers.PostUserChangePassword, 200))
 
 	// Add validation for minimum password length
 	// Test case 1: Valid password
@@ -252,9 +254,9 @@ func TestGetUserMe_Success(t *testing.T) {
 	require.Nil(t, err)
 	u.SetId(id)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.GET("/users/me", controllers.GetUserMe)
+	router.GET("/users/me", nil, tonic.Handler(controllers.GetUserMe, 200))
 
 	req, _ := http.NewRequest(http.MethodGet, "/users/me", nil)
 	req.Header.Set("Content-Type", "application/json")
@@ -288,23 +290,26 @@ func TestPutUserMe_Success(t *testing.T) {
 	require.Nil(t, err)
 
 	// Create router
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.PUT("/users/me", controllers.PutUserMe)
+	router.PUT("/users/me", nil, tonic.Handler(controllers.PutUserMe, 200))
 
 	// Test valid update
-	reqBody := strings.NewReader(`{
-		"username": "updateduser",
-		"email": "updated@example.com"
-	}`)
-	req, err := http.NewRequest(http.MethodPut, "/users/me", reqBody)
+	reqParams := controllers.PutUserMeParams{
+		Data: models.User{
+			Username: "updateduser",
+			Email:    "updated@example.com",
+		},
+	}
+	jsonValue, _ := json.Marshal(reqParams)
+	req, err := http.NewRequest(http.MethodPut, "/users/me", bytes.NewBuffer(jsonValue))
 	assert.Nil(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", token)
 
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equalf(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
 
 	// Verify the update
 	updatedUser, err := modelSvc.GetById(id)
@@ -338,9 +343,9 @@ func TestPostUserMeChangePassword_Success(t *testing.T) {
 	require.Nil(t, err)
 
 	// Create router
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.POST("/users/me/change-password", controllers.PostUserMeChangePassword)
+	router.POST("/users/me/change-password", nil, tonic.Handler(controllers.PostUserMeChangePassword, 200))
 
 	// Test valid password change
 	password := "newValidPassword123"
@@ -388,9 +393,9 @@ func TestDeleteUserById_Success(t *testing.T) {
 	require.Nil(t, err)
 	u.SetId(id)
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.DELETE("/users/:id", controllers.DeleteUserById)
+	router.DELETE("/users/:id", nil, tonic.Handler(controllers.DeleteUserById, 200))
 
 	// Test deleting normal user
 	req, err := http.NewRequest(http.MethodDelete, "/users/"+id.Hex(), nil)
@@ -423,7 +428,7 @@ func TestDeleteUserById_Success(t *testing.T) {
 
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equalf(t, http.StatusForbidden, w.Code, "response body: %s", w.Body.String())
 
 	// Test deleting with invalid ID
 	req, err = http.NewRequest(http.MethodDelete, "/users/invalid-id", nil)
@@ -460,9 +465,9 @@ func TestDeleteUserList_Success(t *testing.T) {
 		}
 	}
 
-	router := gin.Default()
+	router := SetupRouter()
 	router.Use(middlewares.AuthorizationMiddleware())
-	router.DELETE("/users", controllers.DeleteUserList)
+	router.DELETE("/users", nil, tonic.Handler(controllers.DeleteUserList, 200))
 
 	// Test deleting normal users
 	reqBody := strings.NewReader(fmt.Sprintf(`{"ids":["%s","%s"]}`,
@@ -492,7 +497,7 @@ func TestDeleteUserList_Success(t *testing.T) {
 
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equalf(t, http.StatusForbidden, w.Code, "response body: %s", w.Body.String())
 
 	// Test with mix of valid and invalid ids
 	reqBody = strings.NewReader(fmt.Sprintf(`{"ids":["%s","invalid-id"]}`, normalUserIds[0].Hex()))

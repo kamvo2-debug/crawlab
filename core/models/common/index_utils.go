@@ -38,7 +38,7 @@ func normalizeIndexKey(key interface{}) string {
 
 		// Try to unmarshal as array of key-value pairs first
 		var keyArray []struct {
-			Key   string      `json:"Key"`
+			Key   string      `json:"Type"`
 			Value interface{} `json:"Value"`
 		}
 		if err := json.Unmarshal(jsonBytes, &keyArray); err == nil {

@@ -2,6 +2,9 @@ package server
 
 import (
 	"fmt"
+	"net"
+	"sync"
+
 	"github.com/crawlab-team/crawlab/core/grpc/middlewares"
 	"github.com/crawlab-team/crawlab/core/interfaces"
 	"github.com/crawlab-team/crawlab/core/utils"
@@ -11,8 +14,6 @@ import (
 	grpcrecovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
 	errors2 "github.com/pkg/errors"
 	"google.golang.org/grpc"
-	"net"
-	"sync"
 )
 
 type GrpcServer struct {
@@ -83,11 +84,11 @@ func (svr *GrpcServer) Stop() (err error) {
 }
 
 func (svr *GrpcServer) register() {
-	grpc2.RegisterNodeServiceServer(svr.svr, *svr.NodeSvr)
-	grpc2.RegisterModelBaseServiceServer(svr.svr, *svr.ModelBaseServiceSvr)
-	grpc2.RegisterTaskServiceServer(svr.svr, *svr.TaskSvr)
-	grpc2.RegisterDependencyServiceServer(svr.svr, *svr.DependencySvr)
-	grpc2.RegisterMetricServiceServer(svr.svr, *svr.MetricSvr)
+	grpc2.RegisterNodeServiceServer(svr.svr, svr.NodeSvr)
+	grpc2.RegisterModelBaseServiceServer(svr.svr, svr.ModelBaseServiceSvr)
+	grpc2.RegisterTaskServiceServer(svr.svr, svr.TaskSvr)
+	grpc2.RegisterDependencyServiceServer(svr.svr, svr.DependencySvr)
+	grpc2.RegisterMetricServiceServer(svr.svr, svr.MetricSvr)
 }
 
 func (svr *GrpcServer) recoveryHandlerFunc(p interface{}) (err error) {

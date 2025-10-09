@@ -9,7 +9,6 @@ import (
 	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
-	"strings"
 )
 
 func AuthorizationMiddleware() gin.HandlerFunc {
@@ -28,10 +27,7 @@ func AuthorizationMiddleware() gin.HandlerFunc {
 		}
 
 		// token string
-		tokenStr := c.GetHeader("Authorization")
-		if strings.HasPrefix(tokenStr, "Bearer ") {
-			tokenStr = strings.Replace(tokenStr, "Bearer ", "", 1)
-		}
+		tokenStr := utils.GetAPITokenFromContext(c)
 
 		// validate token
 		u, err := userSvc.CheckToken(tokenStr)

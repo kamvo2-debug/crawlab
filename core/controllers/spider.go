@@ -1,255 +1,93 @@
 package controllers
 
 import (
-	"errors"
-	"github.com/crawlab-team/crawlab/core/constants"
-	"github.com/crawlab-team/crawlab/core/models/models"
-	mongo2 "github.com/crawlab-team/crawlab/core/mongo"
-	"github.com/crawlab-team/crawlab/core/spider"
-	"math"
+	"github.com/crawlab-team/crawlab/core/entity"
+	"mime/multipart"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/crawlab-team/crawlab/core/constants"
 	"github.com/crawlab-team/crawlab/core/fs"
 	"github.com/crawlab-team/crawlab/core/interfaces"
+	"github.com/crawlab-team/crawlab/core/models/models"
 	"github.com/crawlab-team/crawlab/core/models/service"
+	mongo2 "github.com/crawlab-team/crawlab/core/mongo"
+	"github.com/crawlab-team/crawlab/core/spider"
 	"github.com/crawlab-team/crawlab/core/spider/admin"
 	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/juju/errors"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-func GetSpiderById(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+// GetSpiderById handles getting a spider by ID
+func GetSpiderById(_ *gin.Context, params *GetByIdParams) (response *Response[models.SpiderDTO], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return GetErrorResponse[models.SpiderDTO](errors.BadRequestf("invalid id format"))
 	}
-	s, err := service.NewModelService[models.Spider]().GetById(id)
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		HandleErrorNotFound(c, err)
-		return
-	}
+
+	// aggregation pipelines
+	pipelines := service.GetByIdPipeline(id)
+	pipelines = addSpiderPipelines(pipelines)
+
+	// perform query
+	var spiders []models.SpiderDTO
+	err = service.GetCollection[models.SpiderDTO]().Aggregate(pipelines, nil).All(&spiders)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.SpiderDTO](err)
 	}
 
-	// stat
-	s.Stat, err = service.NewModelService[models.SpiderStat]().GetById(s.Id)
-	if err != nil {
-		if !errors.Is(err, mongo.ErrNoDocuments) {
-			HandleErrorInternalServerError(c, err)
-			return
-		}
-	}
-
-	// data collection (compatible to old version) # TODO: remove in the future
-	if s.ColName == "" && !s.ColId.IsZero() {
-		col, err := service.NewModelService[models.DataCollection]().GetById(s.ColId)
-		if err != nil {
-			if !errors.Is(err, mongo.ErrNoDocuments) {
-				HandleErrorInternalServerError(c, err)
-				return
-			}
-		} else {
-			s.ColName = col.Name
-		}
-	}
-
-	// git
-	if utils.IsPro() && !s.GitId.IsZero() {
-		s.Git, err = service.NewModelService[models.Git]().GetById(s.GitId)
-		if err != nil {
-			if !errors.Is(err, mongo.ErrNoDocuments) {
-				HandleErrorInternalServerError(c, err)
-				return
-			}
-		}
-	}
-
-	HandleSuccessWithData(c, s)
-}
-
-func GetSpiderList(c *gin.Context) {
-	// get all list
-	all := MustGetFilterAll(c)
-	if all {
-		NewController[models.Spider]().getAll(c)
-		return
-	}
-
-	// get list
-	withStats := c.Query("stats")
-	if withStats == "" {
-		NewController[models.Spider]().GetList(c)
-		return
-	}
-
-	// get list with stats
-	getSpiderListWithStats(c)
-}
-
-func getSpiderListWithStats(c *gin.Context) {
-	// params
-	pagination := MustGetPagination(c)
-	query := MustGetFilterQuery(c)
-	sort := MustGetSortOption(c)
-
-	// get list
-	spiders, err := service.NewModelService[models.Spider]().GetMany(query, &mongo2.FindOptions{
-		Sort:  sort,
-		Skip:  pagination.Size * (pagination.Page - 1),
-		Limit: pagination.Size,
-	})
-	if err != nil {
-		if err.Error() != mongo.ErrNoDocuments.Error() {
-			HandleErrorInternalServerError(c, err)
-		}
-		return
-	}
+	// check results
 	if len(spiders) == 0 {
-		HandleSuccessWithListData(c, []models.Spider{}, 0)
-		return
+		return nil, errors.NotFoundf("spider %s not found", params.Id)
 	}
 
-	// ids
-	var ids []primitive.ObjectID
-	var gitIds []primitive.ObjectID
-	for _, s := range spiders {
-		ids = append(ids, s.Id)
-		if !s.GitId.IsZero() {
-			gitIds = append(gitIds, s.GitId)
-		}
+	return GetDataResponse(spiders[0])
+}
+
+// GetSpiderList handles getting a list of spiders with optional stats
+func GetSpiderList(_ *gin.Context, params *GetListParams) (response *ListResponse[models.SpiderDTO], err error) {
+	// query parameters
+	query := ConvertToBsonMFromListParams(params)
+	sort, err := GetSortOptionFromString(params.Sort)
+	if err != nil {
+		return GetErrorListResponse[models.SpiderDTO](errors.BadRequestf("invalid request parameters: %v", err))
 	}
+	skip, limit := GetSkipLimitFromListParams(params)
 
 	// total count
-	total, err := service.NewModelService[models.Spider]().Count(query)
+	total, err := service.NewModelService[models.SpiderDTO]().Count(query)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorListResponse[models.SpiderDTO](err)
 	}
 
-	// stat list
-	spiderStats, err := service.NewModelService[models.SpiderStat]().GetMany(bson.M{"_id": bson.M{"$in": ids}}, nil)
+	// check total
+	if total == 0 {
+		return GetEmptyListResponse[models.SpiderDTO]()
+	}
+
+	// aggregation pipelines
+	pipelines := service.GetPaginationPipeline(query, sort, skip, limit)
+	pipelines = addSpiderPipelines(pipelines)
+
+	// perform query
+	var spiders []models.SpiderDTO
+	err = service.GetCollection[models.Spider]().Aggregate(pipelines, nil).All(&spiders)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorListResponse[models.SpiderDTO](err)
 	}
 
-	// cache stat list to dict
-	dict := map[primitive.ObjectID]models.SpiderStat{}
-	var taskIds []primitive.ObjectID
-	for _, st := range spiderStats {
-		if st.Tasks > 0 {
-			taskCount := int64(st.Tasks)
-			st.AverageWaitDuration = int64(math.Round(float64(st.WaitDuration) / float64(taskCount)))
-			st.AverageRuntimeDuration = int64(math.Round(float64(st.RuntimeDuration) / float64(taskCount)))
-			st.AverageTotalDuration = int64(math.Round(float64(st.TotalDuration) / float64(taskCount)))
-		}
-		dict[st.Id] = st
-
-		if !st.LastTaskId.IsZero() {
-			taskIds = append(taskIds, st.LastTaskId)
-		}
-	}
-
-	// task list and stats
-	var tasks []models.Task
-	dictTask := map[primitive.ObjectID]models.Task{}
-	dictTaskStat := map[primitive.ObjectID]models.TaskStat{}
-	if len(taskIds) > 0 {
-		// task list
-		queryTask := bson.M{
-			"_id": bson.M{
-				"$in": taskIds,
-			},
-		}
-		tasks, err = service.NewModelService[models.Task]().GetMany(queryTask, nil)
-		if err != nil {
-			HandleErrorInternalServerError(c, err)
-			return
-		}
-
-		// task stats list
-		taskStats, err := service.NewModelService[models.TaskStat]().GetMany(queryTask, nil)
-		if err != nil {
-			HandleErrorInternalServerError(c, err)
-			return
-		}
-
-		// cache task stats to dict
-		for _, st := range taskStats {
-			dictTaskStat[st.Id] = st
-		}
-
-		// cache task list to dict
-		for _, t := range tasks {
-			st, ok := dictTaskStat[t.Id]
-			if ok {
-				t.Stat = &st
-			}
-			dictTask[t.SpiderId] = t
-		}
-	}
-
-	// git list
-	var gits []models.Git
-	if len(gitIds) > 0 && utils.IsPro() {
-		gits, err = service.NewModelService[models.Git]().GetMany(bson.M{"_id": bson.M{"$in": gitIds}}, nil)
-		if err != nil {
-			HandleErrorInternalServerError(c, err)
-			return
-		}
-	}
-
-	// cache git list to dict
-	dictGit := map[primitive.ObjectID]models.Git{}
-	for _, g := range gits {
-		dictGit[g.Id] = g
-	}
-
-	// iterate list again
-	var data []models.Spider
-	for _, s := range spiders {
-		// spider stat
-		st, ok := dict[s.Id]
-		if ok {
-			s.Stat = &st
-
-			// last task
-			t, ok := dictTask[s.Id]
-			if ok {
-				s.Stat.LastTask = &t
-			}
-		}
-
-		// git
-		if !s.GitId.IsZero() && utils.IsPro() {
-			g, ok := dictGit[s.GitId]
-			if ok {
-				s.Git = &g
-			}
-		}
-
-		// add to list
-		data = append(data, s)
-	}
-
-	// response
-	HandleSuccessWithListData(c, data, total)
+	return GetListResponse(spiders, total)
 }
 
-func PostSpider(c *gin.Context) {
-	// bind
-	var s models.Spider
-	if err := c.ShouldBindJSON(&s); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
-	}
+// PostSpider handles creating a new spider
+func PostSpider(c *gin.Context, params *PostParams[models.Spider]) (response *Response[models.Spider], err error) {
+	s := params.Data
 
 	if s.Mode == "" {
 		s.Mode = constants.RunTypeRandom
@@ -266,8 +104,7 @@ func PostSpider(c *gin.Context) {
 	s.SetUpdated(u.Id)
 	id, err := service.NewModelService[models.Spider]().InsertOne(s)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Spider](err)
 	}
 	s.SetId(id)
 
@@ -278,20 +115,17 @@ func PostSpider(c *gin.Context) {
 	st.SetUpdated(u.Id)
 	_, err = service.NewModelService[models.SpiderStat]().InsertOne(st)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Spider](err)
 	}
 
 	// create folder
 	fsSvc, err := getSpiderFsSvcById(id)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Spider](err)
 	}
 	err = fsSvc.CreateDir(".")
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Spider](err)
 	}
 
 	// create template if available
@@ -299,63 +133,24 @@ func PostSpider(c *gin.Context) {
 		if templateSvc := spider.GetSpiderTemplateRegistryService(); templateSvc != nil {
 			err = templateSvc.CreateTemplate(s.Id)
 			if err != nil {
-				HandleErrorInternalServerError(c, err)
-				return
+				return GetErrorResponse[models.Spider](err)
 			}
 		}
 	}
 
-	HandleSuccessWithData(c, s)
+	return GetDataResponse(s)
 }
 
-func PutSpiderById(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+// DeleteSpiderById handles deleting a spider by ID
+func DeleteSpiderById(_ *gin.Context, params *DeleteByIdParams) (response *Response[models.Spider], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return GetErrorResponse[models.Spider](errors.BadRequestf("invalid id format"))
 	}
 
-	// bind
-	var s models.Spider
-	if err := c.ShouldBindJSON(&s); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
-	}
-
-	u := GetUserFromContext(c)
-
-	modelSvc := service.NewModelService[models.Spider]()
-
-	// save
-	s.SetUpdated(u.Id)
-	err = modelSvc.ReplaceById(id, s)
-	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
-	}
-
-	_s, err := modelSvc.GetById(id)
-	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
-	}
-	s = *_s
-
-	HandleSuccessWithData(c, s)
-}
-
-func DeleteSpiderById(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
-	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
-	}
-
-	// spider
 	s, err := service.NewModelService[models.Spider]().GetById(id)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Spider](errors.NotFoundf("spider not found"))
 	}
 
 	if err := mongo2.RunTransaction(func(context mongo.SessionContext) (err error) {
@@ -416,54 +211,56 @@ func DeleteSpiderById(c *gin.Context) {
 
 		return nil
 	}); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Spider](err)
 	}
 
+	// Delete spider directory synchronously to prevent goroutine leaks
 	if !s.GitId.IsZero() {
-		go func() {
-			// delete spider directory
-			fsSvc, err := getSpiderFsSvcById(id)
-			if err != nil {
-				logger.Errorf("failed to get spider fs service: %v", err)
-				return
-			}
+		// delete spider directory
+		fsSvc, err := getSpiderFsSvcById(s.Id)
+		if err != nil {
+			logger.Errorf("failed to get spider fs service: %v", err)
+		} else {
 			err = fsSvc.Delete(".")
 			if err != nil {
 				logger.Errorf("failed to delete spider directory: %v", err)
-				return
 			}
-		}()
+		}
 	}
 
-	HandleSuccess(c)
+	return GetDataResponse(models.Spider{})
 }
 
-func DeleteSpiderList(c *gin.Context) {
-	var payload struct {
-		Ids []primitive.ObjectID `json:"ids"`
-	}
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+type DeleteSpiderListParams struct {
+	Ids []string `json:"ids" validate:"required"`
+}
+
+// DeleteSpiderList handles deleting multiple spiders
+func DeleteSpiderList(_ *gin.Context, params *DeleteSpiderListParams) (response *Response[models.Spider], err error) {
+	var ids []primitive.ObjectID
+	for _, id := range params.Ids {
+		_id, err := primitive.ObjectIDFromHex(id)
+		if err != nil {
+			return GetErrorResponse[models.Spider](errors.BadRequestf("invalid id format"))
+		}
+		ids = append(ids, _id)
 	}
 
 	// Fetch spiders before deletion
 	spiders, err := service.NewModelService[models.Spider]().GetMany(bson.M{
 		"_id": bson.M{
-			"$in": payload.Ids,
+			"$in": ids,
 		},
 	}, nil)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return nil, err
 	}
 
 	if err := mongo2.RunTransaction(func(context mongo.SessionContext) (err error) {
 		// delete spiders
 		if err := service.NewModelService[models.Spider]().DeleteMany(bson.M{
 			"_id": bson.M{
-				"$in": payload.Ids,
+				"$in": ids,
 			},
 		}); err != nil {
 			return err
@@ -472,14 +269,14 @@ func DeleteSpiderList(c *gin.Context) {
 		// delete spider stats
 		if err := service.NewModelService[models.SpiderStat]().DeleteMany(bson.M{
 			"_id": bson.M{
-				"$in": payload.Ids,
+				"$in": ids,
 			},
 		}); err != nil {
 			return err
 		}
 
 		// related tasks
-		tasks, err := service.NewModelService[models.Task]().GetMany(bson.M{"spider_id": bson.M{"$in": payload.Ids}}, nil)
+		tasks, err := service.NewModelService[models.Task]().GetMany(bson.M{"spider_id": bson.M{"$in": ids}}, nil)
 		if err != nil {
 			return err
 		}
@@ -521,145 +318,267 @@ func DeleteSpiderList(c *gin.Context) {
 
 		return nil
 	}); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[models.Spider](err)
 	}
 
-	// Delete spider directories
-	go func() {
-		wg := sync.WaitGroup{}
-		wg.Add(len(spiders))
-		for i := range spiders {
-			go func(s *models.Spider) {
-				defer wg.Done()
-
-				// Skip spider with git
-				if !s.GitId.IsZero() {
-					return
-				}
-
-				// Delete spider directory
-				fsSvc, err := getSpiderFsSvcById(s.Id)
-				if err != nil {
-					logger.Errorf("failed to get spider fs service: %v", err)
-					return
-				}
-				err = fsSvc.Delete(".")
-				if err != nil {
-					logger.Errorf("failed to delete spider directory: %v", err)
-					return
-				}
-			}(&spiders[i])
+	// Delete spider directories synchronously to prevent goroutine leaks
+	wg := sync.WaitGroup{}
+	semaphore := make(chan struct{}, 5) // Limit concurrent operations
+	
+	for i := range spiders {
+		// Skip spider with git
+		if !spiders[i].GitId.IsZero() {
+			continue
 		}
-		wg.Wait()
-	}()
 
-	HandleSuccess(c)
+		wg.Add(1)
+		semaphore <- struct{}{} // Acquire semaphore
+		
+		func(s *models.Spider) {
+			defer func() {
+				<-semaphore // Release semaphore
+				wg.Done()
+			}()
+
+			// Delete spider directory
+			fsSvc, err := getSpiderFsSvcById(s.Id)
+			if err != nil {
+				logger.Errorf("failed to get spider fs service: %v", err)
+				return
+			}
+			err = fsSvc.Delete(".")
+			if err != nil {
+				logger.Errorf("failed to delete spider directory: %v", err)
+				return
+			}
+		}(&spiders[i])
+	}
+	wg.Wait()
+
+	return GetDataResponse(models.Spider{})
 }
 
-func GetSpiderListDir(c *gin.Context) {
-	rootPath, err := getSpiderRootPathByContext(c)
-	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
-	}
-	GetBaseFileListDir(rootPath, c)
+type GetSpiderFilesParams struct {
+	Id   string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path string `query:"path" description:"Directory path"`
 }
 
-func GetSpiderFile(c *gin.Context) {
+func GetSpiderFiles(c *gin.Context, params *GetSpiderFilesParams) (response *Response[[]entity.FsFileInfo], err error) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
+		return GetErrorResponse[[]entity.FsFileInfo](err)
 	}
-	GetBaseFileFile(rootPath, c)
+	return GetBaseFileListDir(rootPath, params.Path)
 }
 
-func GetSpiderFileInfo(c *gin.Context) {
-	rootPath, err := getSpiderRootPathByContext(c)
-	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
-	}
-	GetBaseFileFileInfo(rootPath, c)
+type GetSpiderFileContentParams struct {
+	Id   string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path string `query:"path" description:"File path"`
 }
 
-func PostSpiderSaveFile(c *gin.Context) {
+func GetSpiderFileContent(c *gin.Context, params *GetSpiderFileContentParams) (response *Response[string], err error) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
+		return GetErrorResponse[string](err)
 	}
-	PostBaseFileSaveFile(rootPath, c)
+	return GetBaseFileContent(rootPath, params.Path)
 }
 
-func PostSpiderSaveFiles(c *gin.Context) {
+type GetSpiderFileInfoParams struct {
+	Id   string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path string `query:"path" description:"File path"`
+}
+
+func GetSpiderFileInfo(c *gin.Context, params *GetSpiderFileInfoParams) (response *Response[*entity.FsFileInfo], err error) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
+		return GetErrorResponse[*entity.FsFileInfo](err)
 	}
+	return GetBaseFileInfo(rootPath, params.Path)
+}
+
+type PostSpiderSaveFileParams struct {
+	Id   string                `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path string                `json:"path" description:"File path to save"`
+	Data string                `json:"data" description:"File content"`
+	File *multipart.FileHeader `form:"file"`
+}
+
+func PostSpiderSaveFile(c *gin.Context, params *PostSpiderSaveFileParams) (response *VoidResponse, err error) {
+	rootPath, err := getSpiderRootPathByContext(c)
+	if err != nil {
+		return GetErrorVoidResponse(err)
+	}
+	if c.GetHeader("Content-Type") == "application/json" {
+		return PostBaseFileSaveOne(rootPath, params.Path, params.Data)
+	} else {
+		return PostBaseFileSaveOneForm(rootPath, params.Path, params.File)
+	}
+}
+
+type PostSpiderSaveFilesParams struct {
+	Id              string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	TargetDirectory string `form:"targetDirectory" description:"Target directory path"`
+}
+
+func PostSpiderSaveFiles(c *gin.Context, params *PostSpiderSaveFilesParams) (response *VoidResponse, err error) {
+	rootPath, err := getSpiderRootPathByContext(c)
+	if err != nil {
+		return GetErrorVoidResponse(err)
+	}
+	form, err := c.MultipartForm()
+	if err != nil {
+		return GetErrorVoidResponse(err)
+	}
+	return PostBaseFileSaveMany(filepath.Join(rootPath, params.TargetDirectory), form)
+}
+
+// PostSpiderSaveFilesGin handles saving multiple files to a spider's directory via Gin context TODO: temporary solution
+func PostSpiderSaveFilesGin(c *gin.Context) {
 	targetDirectory := c.PostForm("targetDirectory")
-	PostBaseFileSaveFiles(filepath.Join(rootPath, targetDirectory), c)
-}
-
-func PostSpiderSaveDir(c *gin.Context) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	PostBaseFileSaveDir(rootPath, c)
+	form, err := c.MultipartForm()
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	_, err = PostBaseFileSaveMany(filepath.Join(rootPath, targetDirectory), form)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	HandleSuccessWithData(c, nil)
 }
 
-func PostSpiderRenameFile(c *gin.Context) {
+type PostSpiderSaveDirParams struct {
+	Id   string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path string `json:"path" description:"File path to save"`
+}
+
+func PostSpiderSaveDir(c *gin.Context, params *PostSpiderSaveDirParams) (response *VoidResponse, err error) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
+		return GetErrorVoidResponse(err)
 	}
-	PostBaseFileRenameFile(rootPath, c)
+	return PostBaseFileSaveDir(rootPath, params.Path)
 }
 
-func DeleteSpiderFile(c *gin.Context) {
+type PostSpiderRenameFileParams struct {
+	Id      string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path    string `json:"path" description:"File path to rename"`
+	NewPath string `json:"newPath" description:"New file path"`
+}
+
+func PostSpiderRenameFile(c *gin.Context, params *PostSpiderRenameFileParams) (response *VoidResponse, err error) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
+		return GetErrorVoidResponse(err)
 	}
-	DeleteBaseFileFile(rootPath, c)
+	return PostBaseFileRename(rootPath, params.Path, params.NewPath)
 }
 
-func PostSpiderCopyFile(c *gin.Context) {
+type DeleteSpiderFileParams struct {
+	Id   string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path string `json:"path" description:"File path to delete"`
+}
+
+func DeleteSpiderFile(c *gin.Context, params *DeleteSpiderFileParams) (response *VoidResponse, err error) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
+		return GetErrorVoidResponse(err)
 	}
-	PostBaseFileCopyFile(rootPath, c)
+	return DeleteBaseFile(rootPath, params.Path)
 }
 
-func PostSpiderExport(c *gin.Context) {
+type PostSpiderCopyFileParams struct {
+	Id      string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Path    string `json:"path" description:"File path to copy"`
+	NewPath string `json:"new_path" description:"New file path"`
+}
+
+func PostSpiderCopyFile(c *gin.Context, params *PostSpiderCopyFileParams) (response *VoidResponse, err error) {
 	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorForbidden(c, err)
-		return
+		return GetErrorVoidResponse(err)
 	}
-	PostBaseFileExport(rootPath, c)
+	return PostBaseFileCopy(rootPath, params.Path, params.NewPath)
 }
 
-func PostSpiderRun(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+type PostSpiderExportParams struct {
+	Id string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+}
+
+func PostSpiderExport(c *gin.Context, _ *PostSpiderExportParams) (err error) {
+	rootPath, err := getSpiderRootPathByContext(c)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return err
+	}
+	return PostBaseFileExport(rootPath, c)
+}
+
+type PostSpiderRunParams struct {
+	Id         string   `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Mode       string   `json:"mode" description:"Run mode: random,all,selected-nodes" default:"random" enum:"random,all,selected-nodes"`
+	NodeIds    []string `json:"node_ids" description:"Node IDs, used in selected-nodes mode"`
+	Cmd        string   `json:"cmd" description:"Command"`
+	Param      string   `json:"param" description:"Parameters"`
+	ScheduleId string   `json:"schedule_id" description:"Schedule ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Priority   int      `json:"priority" description:"Priority" default:"5" minimum:"1" maximum:"10"`
+}
+
+func PostSpiderRun(c *gin.Context, params *PostSpiderRunParams) (response *Response[[]primitive.ObjectID], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
+	if err != nil {
+		return GetErrorResponse[[]primitive.ObjectID](errors.BadRequestf("invalid id format"))
+	}
+
+	// get spider
+	s, err := service.NewModelService[models.Spider]().GetById(id)
+	if err != nil {
+		return GetErrorResponse[[]primitive.ObjectID](errors.NotFoundf("spider not found"))
 	}
 
 	// options
-	var opts interfaces.SpiderRunOptions
-	if err := c.ShouldBindJSON(&opts); err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+	var nodeIds []primitive.ObjectID
+	if len(params.NodeIds) > 0 {
+		for _, id := range params.NodeIds {
+			nodeId, err := primitive.ObjectIDFromHex(id)
+			if err != nil {
+				return GetErrorResponse[[]primitive.ObjectID](errors.BadRequestf("invalid node id format"))
+			}
+			nodeIds = append(nodeIds, nodeId)
+		}
+	}
+	var scheduleId primitive.ObjectID
+	if params.ScheduleId != "" {
+		scheduleId, err = primitive.ObjectIDFromHex(params.ScheduleId)
+		if err != nil {
+			return GetErrorResponse[[]primitive.ObjectID](errors.BadRequestf("invalid schedule id format"))
+		}
+	}
+	opts := interfaces.SpiderRunOptions{
+		Mode:       params.Mode,
+		NodeIds:    nodeIds,
+		Cmd:        params.Cmd,
+		Param:      params.Param,
+		ScheduleId: scheduleId,
+		Priority:   params.Priority,
+	}
+	if opts.Mode == "" {
+		opts.Mode = s.Mode
+	}
+	if opts.Cmd == "" {
+		opts.Cmd = s.Cmd
+	}
+	if opts.Param == "" {
+		opts.Param = s.Param
+	}
+	if opts.Priority == 0 {
+		opts.Priority = s.Priority
 	}
 
 	// user
@@ -670,60 +589,63 @@ func PostSpiderRun(c *gin.Context) {
 	// schedule tasks
 	taskIds, err := admin.GetSpiderAdminService().Schedule(id, &opts)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorResponse[[]primitive.ObjectID](err)
 	}
 
-	HandleSuccessWithData(c, taskIds)
+	return GetDataResponse(taskIds)
 }
 
-func GetSpiderResults(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+type GetSpiderResultsParams struct {
+	Id   string `path:"id" description:"Spider ID" format:"objectid" pattern:"^[0-9a-fA-F]{24}$"`
+	Page int    `query:"page" description:"Page" default:"1" minimum:"1"`
+	Size int    `query:"size" description:"Size" default:"10" minimum:"1"`
+}
+
+func GetSpiderResults(c *gin.Context, params *GetSpiderResultsParams) (response *ListResponse[bson.M], err error) {
+	id, err := primitive.ObjectIDFromHex(params.Id)
 	if err != nil {
-		HandleErrorBadRequest(c, err)
-		return
+		return GetErrorListResponse[bson.M](errors.BadRequestf("invalid id format"))
 	}
 
 	s, err := service.NewModelService[models.Spider]().GetById(id)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorListResponse[bson.M](err)
 	}
 
-	// params
-	pagination := MustGetPagination(c)
-	query := getResultListQuery(c)
+	query := ConvertToBsonMFromContext(c)
+	if query == nil {
+		query = bson.M{}
+	}
+	query["_sid"] = s.Id
 
 	col := mongo2.GetMongoCol(s.ColName)
 
 	var results []bson.M
-	err = col.Find(mongo2.GetMongoQuery(query), mongo2.GetMongoOpts(&mongo2.ListOptions{
+	err = col.Find(query, mongo2.GetMongoOpts(&mongo2.ListOptions{
 		Sort:  []mongo2.ListSort{{"_id", mongo2.SortDirectionDesc}},
-		Skip:  pagination.Size * (pagination.Page - 1),
-		Limit: pagination.Size,
+		Skip:  params.Size * (params.Page - 1),
+		Limit: params.Size,
 	})).All(&results)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorListResponse[bson.M](err)
 	}
 
-	total, err := mongo2.GetMongoCol(s.ColName).Count(mongo2.GetMongoQuery(query))
+	total, err := mongo2.GetMongoCol(s.ColName).Count(query)
 	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
+		return GetErrorListResponse[bson.M](err)
 	}
 
-	HandleSuccessWithListData(c, results, total)
+	return GetListResponse(results, total)
 }
 
-func getSpiderFsSvc(s *models.Spider) (svc interfaces.FsService, err error) {
+func getSpiderFsSvc(s *models.Spider) (svc *fs.Service, err error) {
 	workspacePath := utils.GetWorkspace()
 	fsSvc := fs.NewFsService(filepath.Join(workspacePath, s.Id.Hex()))
 
 	return fsSvc, nil
 }
 
-func getSpiderFsSvcById(id primitive.ObjectID) (svc interfaces.FsService, err error) {
+func getSpiderFsSvcById(id primitive.ObjectID) (svc *fs.Service, err error) {
 	s, err := service.NewModelService[models.Spider]().GetById(id)
 	if err != nil {
 		logger.Errorf("failed to get spider: %v", err)
@@ -733,17 +655,25 @@ func getSpiderFsSvcById(id primitive.ObjectID) (svc interfaces.FsService, err er
 }
 
 func getSpiderRootPathByContext(c *gin.Context) (rootPath string, err error) {
-	// spider id
 	id, err := primitive.ObjectIDFromHex(c.Param("id"))
 	if err != nil {
 		return "", err
 	}
-
-	// spider
 	s, err := service.NewModelService[models.Spider]().GetById(id)
 	if err != nil {
 		return "", err
 	}
-
 	return utils.GetSpiderRootPath(s)
+}
+
+func addSpiderPipelines(pipelines []bson.D) []bson.D {
+	pipelines = append(pipelines, service.GetJoinPipeline[models.SpiderStat]("_id", "_id", "_stat")...)
+	pipelines = append(pipelines, service.GetJoinPipeline[models.Task]("_stat.last_task_id", "_id", "_last_task")...)
+	pipelines = append(pipelines, service.GetJoinPipeline[models.TaskStat]("_last_task._id", "_id", "_last_task._stat")...)
+	pipelines = append(pipelines, service.GetDefaultJoinPipeline[models.Project]()...)
+	if utils.IsPro() {
+		pipelines = append(pipelines, service.GetDefaultJoinPipeline[models.Git]()...)
+		pipelines = append(pipelines, service.GetDefaultJoinPipeline[models.Database]()...)
+	}
+	return pipelines
 }

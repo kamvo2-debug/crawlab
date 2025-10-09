@@ -13,6 +13,7 @@ func PrintLogoWithWelcomeInfo() {
 
 func printLogo() {
 	figure.NewColorFigure("Crawlab", "slant", "blue", true).Print()
+	fmt.Println()
 	fmt.Println("Welcome to use Crawlab: the ultimate distributed web crawling platform for efficient, scalable data extraction.")
 	fmt.Println()
 }

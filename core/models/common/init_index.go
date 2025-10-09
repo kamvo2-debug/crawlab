@@ -44,13 +44,13 @@ func InitIndexes() {
 		{Keys: bson.D{{Key: "priority", Value: 1}}},
 		{Keys: bson.D{{Key: "parent_id", Value: 1}}},
 		{Keys: bson.D{{Key: "has_sub", Value: 1}}},
-		{Keys: bson.D{{Key: "created_ts", Value: -1}}, Options: (&options.IndexOptions{}).SetExpireAfterSeconds(60 * 60 * 24 * 30)},
+		{Keys: bson.D{{Key: "created_at", Value: -1}}, Options: (&options.IndexOptions{}).SetExpireAfterSeconds(60 * 60 * 24 * 30)},
 		{Keys: bson.D{{Key: "node_id", Value: 1}, {Key: "status", Value: 1}}},
 	})
 
 	// task stats
 	CreateIndexes(mongo.GetMongoCol(service.GetCollectionNameByInstance(models.TaskStat{})), []mongo2.IndexModel{
-		{Keys: bson.D{{Key: "created_ts", Value: -1}}, Options: (&options.IndexOptions{}).SetExpireAfterSeconds(60 * 60 * 24 * 30)},
+		{Keys: bson.D{{Key: "created_at", Value: -1}}, Options: (&options.IndexOptions{}).SetExpireAfterSeconds(60 * 60 * 24 * 30)},
 	})
 
 	// schedules

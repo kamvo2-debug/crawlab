@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/apex/log"
-	"github.com/crawlab-team/crawlab/core/entity"
 	"github.com/crawlab-team/crawlab/core/utils"
 	"io"
 	"net/http"
@@ -23,7 +22,7 @@ type ResBody struct {
 }
 
 // RequestParam represents parameters for HTTP requests
-type RequestParam entity.RequestParam
+type RequestParam map[string]interface{}
 
 // performRequest performs an HTTP request with JSON body
 func performRequest(method, url string, data interface{}) (*http.Response, []byte, error) {

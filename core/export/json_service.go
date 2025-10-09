@@ -11,6 +11,7 @@ import (
 	"github.com/crawlab-team/crawlab/core/mongo"
 	"github.com/crawlab-team/crawlab/core/utils"
 	"github.com/hashicorp/go-uuid"
+	"go.mongodb.org/mongo-driver/bson"
 	mongo2 "go.mongodb.org/mongo-driver/mongo"
 	"os"
 	"path"
@@ -31,7 +32,7 @@ func (svc *JsonService) GenerateId() (exportId string, err error) {
 	return exportId, nil
 }
 
-func (svc *JsonService) Export(exportType, target string, filter interfaces.Filter) (exportId string, err error) {
+func (svc *JsonService) Export(exportType, target string, query bson.M) (exportId string, err error) {
 	// generate export id
 	exportId, err = svc.GenerateId()
 	if err != nil {
@@ -43,9 +44,9 @@ func (svc *JsonService) Export(exportType, target string, filter interfaces.Filt
 		Id:           exportId,
 		Type:         exportType,
 		Target:       target,
-		Filter:       filter,
+		Query:        query,
 		Status:       constants.TaskStatusRunning,
-		StartTs:      time.Now(),
+		StartedAt:    time.Now(),
 		FileName:     svc.getFileName(exportId),
 		DownloadPath: svc.getDownloadPath(exportId),
 		Limit:        100,
@@ -76,7 +77,7 @@ func (svc *JsonService) export(export *entity.Export) {
 	if export.Target == "" {
 		err := errors.New("empty target")
 		export.Status = constants.TaskStatusError
-		export.EndTs = time.Now()
+		export.EndedAt = time.Now()
 		svc.Errorf("export error (id: %s): %v", export.Id, err)
 		svc.cache.Set(export.Id, export)
 		return
@@ -85,18 +86,8 @@ func (svc *JsonService) export(export *entity.Export) {
 	// mongo collection
 	col := mongo.GetMongoCol(export.Target)
 
-	// mongo query
-	query, err := utils.FilterToQuery(export.Filter)
-	if err != nil {
-		export.Status = constants.TaskStatusError
-		export.EndTs = time.Now()
-		svc.Errorf("export error (id: %s): %v", export.Id, err)
-		svc.cache.Set(export.Id, export)
-		return
-	}
-
 	// mongo cursor
-	cur := col.Find(query, nil).GetCursor()
+	cur := col.Find(export.Query, nil).GetCursor()
 
 	// data
 	var jsonData []interface{}
@@ -113,13 +104,13 @@ func (svc *JsonService) export(export *entity.Export) {
 			if !errors.Is(err, mongo2.ErrNoDocuments) {
 				// error
 				export.Status = constants.TaskStatusError
-				export.EndTs = time.Now()
+				export.EndedAt = time.Now()
 				svc.Errorf("export error (id: %s): %v", export.Id, err)
 
 			} else {
 				// no more data
 				export.Status = constants.TaskStatusFinished
-				export.EndTs = time.Now()
+				export.EndedAt = time.Now()
 				svc.Infof("export finished (id: %s)", export.Id)
 			}
 			svc.cache.Set(export.Id, export)
@@ -130,7 +121,7 @@ func (svc *JsonService) export(export *entity.Export) {
 		if !cur.Next(context.Background()) {
 			// no more data
 			export.Status = constants.TaskStatusFinished
-			export.EndTs = time.Now()
+			export.EndedAt = time.Now()
 			svc.Infof("export finished (id: %s)", export.Id)
 			svc.cache.Set(export.Id, export)
 			break
@@ -142,7 +133,7 @@ func (svc *JsonService) export(export *entity.Export) {
 		if err != nil {
 			// error
 			export.Status = constants.TaskStatusError
-			export.EndTs = time.Now()
+			export.EndedAt = time.Now()
 			svc.Errorf("export error (id: %s): %v", export.Id, err)
 			svc.cache.Set(export.Id, export)
 			return
@@ -155,7 +146,7 @@ func (svc *JsonService) export(export *entity.Export) {
 	if err != nil {
 		// error
 		export.Status = constants.TaskStatusError
-		export.EndTs = time.Now()
+		export.EndedAt = time.Now()
 		svc.Errorf("export error (id: %s): %v", export.Id, err)
 		svc.cache.Set(export.Id, export)
 		return
@@ -166,7 +157,7 @@ func (svc *JsonService) export(export *entity.Export) {
 	if err != nil {
 		// error
 		export.Status = constants.TaskStatusError
-		export.EndTs = time.Now()
+		export.EndedAt = time.Now()
 		svc.Errorf("export error (id: %s): %v", export.Id, err)
 		svc.cache.Set(export.Id, export)
 		return

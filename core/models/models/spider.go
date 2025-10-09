@@ -5,37 +5,41 @@ import (
 )
 
 type Spider struct {
-	any               `collection:"spiders"`
-	BaseModel[Spider] `bson:",inline"`
-	Name              string                `json:"name" bson:"name"`                     // spider name
-	ColId             primitive.ObjectID    `json:"col_id" bson:"col_id"`                 // data collection id (deprecated) # TODO: remove this field in the future
-	ColName           string                `json:"col_name,omitempty" bson:"col_name"`   // data collection name
-	DbName            string                `json:"db_name,omitempty" bson:"db_name"`     // database name
-	DataSourceId      primitive.ObjectID    `json:"data_source_id" bson:"data_source_id"` // data source id
-	DataSource        *Database             `json:"data_source,omitempty" bson:"-"`       // data source
-	Description       string                `json:"description" bson:"description"`       // description
-	ProjectId         primitive.ObjectID    `json:"project_id" bson:"project_id"`         // Project.Id
-	Mode              string                `json:"mode" bson:"mode"`                     // default Task.Mode
-	NodeIds           []primitive.ObjectID  `json:"node_ids" bson:"node_ids"`             // default Task.NodeIds
-	GitId             primitive.ObjectID    `json:"git_id" bson:"git_id"`                 // related Git.Id
-	GitRootPath       string                `json:"git_root_path" bson:"git_root_path"`
-	Git               *Git                  `json:"git,omitempty" bson:"-"`
-	Template          string                `json:"template,omitempty" bson:"template,omitempty"` // spider template
-	TemplateParams    *SpiderTemplateParams `json:"template_params,omitempty" bson:"template_params,omitempty"`
-
-	// stats
-	Stat *SpiderStat `json:"stat,omitempty" bson:"-"`
+	any            `collection:"spiders"`
+	BaseModel      `bson:",inline"`
+	Name           string                `json:"name" bson:"name" description:"Spider name"`
+	ColId          primitive.ObjectID    `json:"col_id" bson:"col_id" description:"Data collection id" deprecated:"true"`
+	ColName        string                `json:"col_name,omitempty" bson:"col_name" description:"Data collection name"`
+	DbName         string                `json:"db_name,omitempty" bson:"db_name" description:"Database name"`
+	Description    string                `json:"description" bson:"description" description:"Description"`
+	DatabaseId     primitive.ObjectID    `json:"database_id" bson:"database_id" description:"Database Id"`
+	ProjectId      primitive.ObjectID    `json:"project_id" bson:"project_id" description:"Project ID"`
+	Mode           string                `json:"mode" bson:"mode" description:"Default task mode" enum:"random,all,selected-nodes"`
+	NodeIds        []primitive.ObjectID  `json:"node_ids" bson:"node_ids" description:"Default node ids, used in selected-nodes mode"`
+	GitId          primitive.ObjectID    `json:"git_id" bson:"git_id" description:"Related Git ID"`
+	GitRootPath    string                `json:"git_root_path" bson:"git_root_path" description:"Git root path"`
+	Template       string                `json:"template,omitempty" bson:"template,omitempty" description:"Spider template"`
+	TemplateParams *SpiderTemplateParams `json:"template_params,omitempty" bson:"template_params,omitempty" description:"Spider template params"`
 
 	// execution
-	Cmd         string `json:"cmd" bson:"cmd"`     // execute command
-	Param       string `json:"param" bson:"param"` // default task param
-	Priority    int    `json:"priority" bson:"priority"`
-	AutoInstall bool   `json:"auto_install" bson:"auto_install"`
+	Cmd      string `json:"cmd" bson:"cmd" description:"Execute command"`
+	Param    string `json:"param" bson:"param" description:"Default task param"`
+	Priority int    `json:"priority" bson:"priority" description:"Priority" default:"5" minimum:"1" maximum:"10"`
 }
 
 type SpiderTemplateParams struct {
-	ProjectName    string `json:"project_name,omitempty" bson:"project_name,omitempty"`
-	SpiderName     string `json:"spider_name,omitempty" bson:"spider_name,omitempty"`
-	StartUrls      string `json:"start_urls,omitempty" bson:"start_urls,omitempty"`
-	AllowedDomains string `json:"allowed_domains,omitempty" bson:"allowed_domains,omitempty"`
+	ProjectName    string `json:"project_name,omitempty" bson:"project_name,omitempty" description:"Project name"`
+	SpiderName     string `json:"spider_name,omitempty" bson:"spider_name,omitempty" description:"Spider name"`
+	StartUrls      string `json:"start_urls,omitempty" bson:"start_urls,omitempty" description:"Start urls"`
+	AllowedDomains string `json:"allowed_domains,omitempty" bson:"allowed_domains,omitempty" description:"Allowed domains"`
+}
+
+type SpiderDTO struct {
+	Spider `json:",inline" bson:",inline"`
+
+	Stat     *SpiderStat `json:"stat,omitempty" bson:"_stat,omitempty"`
+	LastTask *Task       `json:"last_task,omitempty" bson:"_last_task,omitempty"`
+	Project  *Project    `json:"project,omitempty" bson:"_project,omitempty"`
+	Git      *Git        `json:"git,omitempty" bson:"_git,omitempty"`
+	Database *Database   `json:"database,omitempty" bson:"_database,omitempty"`
 }

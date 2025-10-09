@@ -2,12 +2,7 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"github.com/crawlab-team/crawlab/core/controllers"
-	"github.com/gin-gonic/gin"
-	"net"
-	"net/http"
 	"sync"
 	"time"
 
@@ -28,20 +23,28 @@ type WorkerService struct {
 	// dependencies
 	cfgSvc     interfaces.NodeConfigService
 	handlerSvc *handler.Service
+	healthSvc  *HealthService
 
 	// settings
-	address           interfaces.Address
 	heartbeatInterval time.Duration
+
+	// context and synchronization
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	mu     sync.RWMutex
 
 	// internals
 	stopped bool
 	n       *models.Node
-	s       grpc.NodeService_SubscribeClient
 	isReady bool
 	interfaces.Logger
 }
 
 func (svc *WorkerService) Start() {
+	// initialize context for the service
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+
 	// wait for grpc client ready
 	client.GetGrpcClient().WaitForReady()
 
@@ -49,19 +52,45 @@ func (svc *WorkerService) Start() {
 	svc.register()
 
 	// mark as ready after registration
+	svc.mu.Lock()
 	svc.isReady = true
+	svc.mu.Unlock()
+	svc.healthSvc.SetReady(true)
 
 	// start health check server
-	go svc.startHealthServer()
+	svc.wg.Add(1)
+	go func() {
+		defer svc.wg.Done()
+		// Start health service with worker-specific health check
+		svc.healthSvc.Start(func() bool {
+			svc.mu.RLock()
+			defer svc.mu.RUnlock()
+			return svc.isReady && !svc.stopped && client.GetGrpcClient() != nil && !client.GetGrpcClient().IsClosed()
+		})
+	}()
 
-	// subscribe
-	go svc.subscribe()
+	// subscribe to master
+	svc.wg.Add(1)
+	go func() {
+		defer svc.wg.Done()
+		svc.subscribe()
+	}()
 
 	// start sending heartbeat to master
-	go svc.reportStatus()
+	svc.wg.Add(1)
+	go func() {
+		defer svc.wg.Done()
+		svc.reportStatus()
+	}()
 
 	// start task handler
-	go svc.handlerSvc.Start()
+	svc.wg.Add(1)
+	go func() {
+		defer svc.wg.Done()
+		svc.handlerSvc.Start()
+	}()
+
+	svc.Infof("worker[%s] service started", svc.cfgSvc.GetNodeKey())
 
 	// wait for quit signal
 	svc.Wait()
@@ -75,17 +104,60 @@ func (svc *WorkerService) Wait() {
 }
 
 func (svc *WorkerService) Stop() {
+	svc.mu.Lock()
+	if svc.stopped {
+		svc.mu.Unlock()
+		return
+	}
 	svc.stopped = true
-	_ = client.GetGrpcClient().Stop()
-	svc.handlerSvc.Stop()
-	svc.Infof("worker[%s] service has stopped", svc.cfgSvc.GetNodeKey())
+	svc.mu.Unlock()
+
+	svc.Infof("stopping worker[%s] service...", svc.cfgSvc.GetNodeKey())
+
+	// cancel context to signal all goroutines to stop
+	if svc.cancel != nil {
+		svc.cancel()
+	}
+
+	// stop task handler
+	if svc.handlerSvc != nil {
+		svc.handlerSvc.Stop()
+	}
+
+	// stop health service
+	if svc.healthSvc != nil {
+		svc.healthSvc.Stop()
+	}
+
+	// stop grpc client
+	if err := client.GetGrpcClient().Stop(); err != nil {
+		svc.Errorf("error stopping grpc client: %v", err)
+	}
+
+	// wait for all goroutines to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		svc.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		svc.Infof("worker[%s] service has stopped gracefully", svc.cfgSvc.GetNodeKey())
+	case <-time.After(10 * time.Second):
+		svc.Warnf("worker[%s] service shutdown timed out", svc.cfgSvc.GetNodeKey())
+	}
 }
 
 func (svc *WorkerService) register() {
 	op := func() (err error) {
 		ctx, cancel := client.GetGrpcClient().Context()
 		defer cancel()
-		_, err = client.GetGrpcClient().NodeClient.Register(ctx, &grpc.NodeServiceRegisterRequest{
+		nodeClient, err := client.GetGrpcClient().GetNodeClient()
+		if err != nil {
+			return fmt.Errorf("failed to get node client: %v", err)
+		}
+		_, err = nodeClient.Register(ctx, &grpc.NodeServiceRegisterRequest{
 			NodeKey:    svc.cfgSvc.GetNodeKey(),
 			NodeName:   svc.cfgSvc.GetNodeName(),
 			MaxRunners: int32(svc.cfgSvc.GetMaxRunners()),
@@ -116,18 +188,22 @@ func (svc *WorkerService) register() {
 
 func (svc *WorkerService) reportStatus() {
 	ticker := time.NewTicker(svc.heartbeatInterval)
+	defer ticker.Stop()
+
 	for {
-		// return if client is closed
-		if client.GetGrpcClient().IsClosed() {
-			ticker.Stop()
+		select {
+		case <-svc.ctx.Done():
+			svc.Debugf("heartbeat goroutine stopping due to context cancellation")
 			return
+		case <-ticker.C:
+			// return if client is closed
+			if client.GetGrpcClient().IsClosed() {
+				svc.Debugf("heartbeat goroutine stopping due to closed grpc client")
+				return
+			}
+			// send heartbeat
+			svc.sendHeartbeat()
 		}
-
-		// send heartbeat
-		svc.sendHeartbeat()
-
-		// sleep
-		<-ticker.C
 	}
 }
 
@@ -139,36 +215,89 @@ func (svc *WorkerService) subscribe() {
 	// Configure exponential backoff
 	b := backoff.NewExponentialBackOff()
 	b.InitialInterval = 1 * time.Second
-	b.MaxInterval = 1 * time.Minute
-	b.MaxElapsedTime = 10 * time.Minute
+	b.MaxInterval = 30 * time.Second   // Reduced from 1 minute
+	b.MaxElapsedTime = 0 * time.Minute // Never give up
 	b.Multiplier = 2.0
 
 	for {
-		if svc.stopped {
-			svc.Infof("subscription stopped. exiting...")
+		select {
+		case <-svc.ctx.Done():
+			svc.Infof("subscription stopped due to context cancellation")
 			return
+		default:
 		}
 
 		// Use backoff for connection attempts
 		operation := func() error {
 			svc.Debugf("attempting to subscribe to master")
-			stream, err := client.GetGrpcClient().NodeClient.Subscribe(context.Background(), &grpc.NodeServiceSubscribeRequest{
+
+			// Wait for gRPC client to be ready and registered after reconnection
+			grpcClient := client.GetGrpcClient()
+
+			waitStart := time.Now()
+			checkCount := 0
+			for !grpcClient.IsReadyAndRegistered() {
+				select {
+				case <-svc.ctx.Done():
+					return svc.ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+					checkCount++
+					// Log periodically while waiting
+					if checkCount%20 == 0 { // Every 10 seconds
+						svc.Warnf("still waiting for gRPC client (%.1fs)", time.Since(waitStart).Seconds())
+
+						// Force a reconnection attempt if we've been waiting too long
+						if time.Since(waitStart) > 15*time.Second {
+							svc.Warnf("forcing gRPC client reset due to prolonged wait")
+							grpcClient = client.ResetGrpcClient()
+							waitStart = time.Now()
+							checkCount = 0
+						}
+
+						// Check if client is in SHUTDOWN state and force restart
+						if !grpcClient.IsReady() && grpcClient.IsClosed() {
+							svc.Warnf("gRPC client is in SHUTDOWN state, forcing reset")
+							grpcClient = client.ResetGrpcClient()
+							waitStart = time.Now()
+							checkCount = 0
+						}
+					}
+				}
+			}
+			svc.Debugf("gRPC client is ready and registered after %.1fs", time.Since(waitStart).Seconds())
+
+			nodeClient, err := grpcClient.GetNodeClient()
+			if err != nil {
+				svc.Errorf("failed to get node client: %v", err)
+				return err
+			}
+
+			// Use service context for proper cancellation
+			stream, err := nodeClient.Subscribe(svc.ctx, &grpc.NodeServiceSubscribeRequest{
 				NodeKey: svc.cfgSvc.GetNodeKey(),
 			})
 			if err != nil {
 				svc.Errorf("failed to subscribe to master: %v", err)
 				return err
 			}
-			svc.Debugf("subscribed to master")
+			svc.Infof("successfully subscribed to master")
 
 			// Handle messages
 			for {
-				if svc.stopped {
+				select {
+				case <-svc.ctx.Done():
+					svc.Debugf("subscription message loop stopped due to context cancellation")
 					return nil
+				default:
 				}
 
 				msg, err := stream.Recv()
 				if err != nil {
+					if svc.ctx.Err() != nil {
+						// Context was cancelled, this is expected
+						svc.Debugf("stream receive cancelled due to context")
+						return nil
+					}
 					if client.GetGrpcClient().IsClosed() {
 						svc.Errorf("connection to master is closed: %v", err)
 						return err
@@ -178,55 +307,49 @@ func (svc *WorkerService) subscribe() {
 				}
 
 				switch msg.Code {
-				case grpc.NodeServiceSubscribeCode_PING:
+				case grpc.NodeServiceSubscribeCode_HEARTBEAT:
 					// do nothing
 				}
 			}
 		}
 
 		// Execute with backoff
-		err := backoff.Retry(operation, b)
+		err := backoff.Retry(operation, backoff.WithContext(b, svc.ctx))
 		if err != nil {
-			svc.Errorf("subscription failed after max retries: %v", err)
-			return
+			if svc.ctx.Err() != nil {
+				// Context was cancelled, exit gracefully
+				svc.Infof("subscription retry cancelled due to context")
+				return
+			}
+			svc.Errorf("subscription attempt failed: %v", err)
+			// Reset backoff for next attempt
+			b.Reset()
+		} else {
+			svc.Debugf("subscription completed successfully")
 		}
 
-		// Wait before attempting to reconnect
-		time.Sleep(time.Second)
+		// Wait before attempting to reconnect, but respect context cancellation
+		select {
+		case <-svc.ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 
 func (svc *WorkerService) sendHeartbeat() {
-	ctx, cancel := context.WithTimeout(context.Background(), svc.heartbeatInterval)
+	ctx, cancel := context.WithTimeout(svc.ctx, svc.heartbeatInterval)
 	defer cancel()
-	_, err := client.GetGrpcClient().NodeClient.SendHeartbeat(ctx, &grpc.NodeServiceSendHeartbeatRequest{
+	nodeClient, err := client.GetGrpcClient().GetNodeClient()
+	if err != nil {
+		svc.Errorf("failed to get node client: %v", err)
+		return
+	}
+	_, err = nodeClient.SendHeartbeat(ctx, &grpc.NodeServiceSendHeartbeatRequest{
 		NodeKey: svc.cfgSvc.GetNodeKey(),
 	})
 	if err != nil {
 		svc.Errorf("failed to send heartbeat to master: %v", err)
-	}
-}
-
-func (svc *WorkerService) startHealthServer() {
-	// handlers
-	app := gin.New()
-	app.GET("/health", controllers.GetHealthFn(func() bool {
-		return svc.isReady && !svc.stopped && client.GetGrpcClient() != nil && !client.GetGrpcClient().IsClosed()
-	}))
-
-	// listen
-	ln, err := net.Listen("tcp", utils.GetServerAddress())
-	if err != nil {
-		panic(err)
-	}
-
-	// serve
-	if err := http.Serve(ln, app); err != nil {
-		if !errors.Is(err, http.ErrServerClosed) {
-			svc.Errorf("run server error: %v", err)
-		} else {
-			svc.Info("server graceful down")
-		}
 	}
 }
 
@@ -235,6 +358,7 @@ func newWorkerService() *WorkerService {
 		heartbeatInterval: 15 * time.Second,
 		cfgSvc:            nodeconfig.GetNodeConfigService(),
 		handlerSvc:        handler.GetTaskHandlerService(),
+		healthSvc:         GetHealthService(),
 		isReady:           false,
 		Logger:            utils.NewLogger("WorkerService"),
 	}

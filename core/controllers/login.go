@@ -7,30 +7,26 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func PostLogin(c *gin.Context) {
-	var payload struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		HandleErrorBadRequest(c, err)
-		return
-	}
-	userSvc, err := user.GetUserService()
-	if err != nil {
-		HandleErrorInternalServerError(c, err)
-		return
-	}
-	token, loggedInUser, err := userSvc.Login(payload.Username, payload.Password)
-	if err != nil {
-		HandleErrorUnauthorized(c, errors.ErrorUserUnauthorized)
-		return
-	}
-	c.Set(constants.UserContextKey, loggedInUser)
-	HandleSuccessWithData(c, token)
+type PostLoginParams struct {
+	Username string `json:"username" description:"Username" validate:"required"`
+	Password string `json:"password" description:"Password" validate:"required"`
 }
 
-func PostLogout(c *gin.Context) {
-	c.Set(constants.UserContextKey, nil)
-	HandleSuccess(c)
+func PostLogin(c *gin.Context, params *PostLoginParams) (response *Response[string], err error) {
+	userSvc, err := user.GetUserService()
+	if err != nil {
+		return GetErrorResponse[string](err)
+	}
+
+	token, loggedInUser, err := userSvc.Login(params.Username, params.Password)
+	if err != nil {
+		return GetErrorResponse[string](errors.ErrorUserUnauthorized)
+	}
+
+	c.Set(constants.UserContextKey, loggedInUser)
+	return GetDataResponse(token)
+}
+
+func PostLogout(_ *gin.Context) (response *VoidResponse, err error) {
+	return GetVoidResponse()
 }

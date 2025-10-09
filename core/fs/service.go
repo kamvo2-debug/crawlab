@@ -19,7 +19,7 @@ type Service struct {
 	interfaces.Logger
 }
 
-func (svc *Service) List(path string) (files []interfaces.FsFileInfo, err error) {
+func (svc *Service) List(path string) (files []entity.FsFileInfo, err error) {
 	// Normalize the provided path
 	normPath := filepath.Clean(path)
 	if normPath == "." {
@@ -74,8 +74,8 @@ func (svc *Service) List(path string) (files []interfaces.FsFileInfo, err error)
 	})
 
 	if rootInfo, ok := dirMap[fullPath]; ok {
-		for _, info := range rootInfo.GetChildren() {
-			files = append(files, info)
+		for _, info := range rootInfo.Children {
+			files = append(files, *info)
 		}
 	}
 
@@ -86,7 +86,7 @@ func (svc *Service) GetFile(path string) (data []byte, err error) {
 	return os.ReadFile(filepath.Join(svc.rootPath, path))
 }
 
-func (svc *Service) GetFileInfo(path string) (file interfaces.FsFileInfo, err error) {
+func (svc *Service) GetFileInfo(path string) (file *entity.FsFileInfo, err error) {
 	f, err := os.Stat(filepath.Join(svc.rootPath, path))
 	if err != nil {
 		svc.Errorf("failed to get file info: %v", err)
@@ -184,7 +184,7 @@ func (svc *Service) Export() (resultPath string, err error) {
 	return zipFilePath, nil
 }
 
-func NewFsService(path string) (svc interfaces.FsService) {
+func NewFsService(path string) (svc *Service) {
 	return &Service{
 		rootPath:  path,
 		skipNames: []string{".git"},

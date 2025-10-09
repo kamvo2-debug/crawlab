@@ -50,7 +50,7 @@ func (app *Api) Start() {
 
 	// http server
 	app.srv = &http.Server{
-		Handler: app.app,
+		Handler: app.GetHttpServerHandler(),
 		Addr:    address,
 	}
 
@@ -83,6 +83,10 @@ func (app *Api) Stop() {
 	if err := app.srv.Shutdown(ctx); err != nil {
 		app.Errorf("shutdown api server error: %v", err)
 	}
+}
+
+func (app *Api) GetHttpServerHandler() http.Handler {
+	return controllers.GetGlobalFizzWrapper().GetFizz()
 }
 
 func (app *Api) GetGinEngine() *gin.Engine {
