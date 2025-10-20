@@ -98,7 +98,7 @@ func (svc *Service) subscribeTaskWithContext(ctx context.Context, taskId primiti
 	req := &grpc.TaskServiceSubscribeRequest{
 		TaskId: taskId.Hex(),
 	}
-	taskClient, err := svc.c.GetTaskClient()
+	taskClient, err := svc.getGrpcClient().GetTaskClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get task client: %v", err)
 	}

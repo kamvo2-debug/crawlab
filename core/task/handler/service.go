@@ -288,6 +288,12 @@ func (svc *Service) GetNodeConfigService() (cfgSvc interfaces.NodeConfigService)
 	return svc.cfgSvc
 }
 
+// getGrpcClient returns the current gRPC client, ensuring we always have the latest instance
+// This is important after ResetGrpcClient() calls which create new client instances
+func (svc *Service) getGrpcClient() *grpcclient.GrpcClient {
+	return grpcclient.GetGrpcClient()
+}
+
 func (svc *Service) getCurrentNodeMaxRunners() int {
 	n, err := svc.GetCurrentNode()
 	if err != nil {
@@ -450,7 +456,7 @@ func (svc *Service) fetchTask() (tid primitive.ObjectID, err error) {
 	// Use service context with timeout for fetch operation
 	ctx, cancel := context.WithTimeout(svc.ctx, svc.fetchTimeout)
 	defer cancel()
-	taskClient, err := svc.c.GetTaskClient()
+	taskClient, err := svc.getGrpcClient().GetTaskClient()
 	if err != nil {
 		return primitive.NilObjectID, fmt.Errorf("failed to get task client: %v", err)
 	}
