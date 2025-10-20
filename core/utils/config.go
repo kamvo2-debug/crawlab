@@ -348,3 +348,7 @@ func GetMinFileDescriptorLimit() uint64 {
 	}
 	return DefaultMinFileDescriptorLimit
 }
+
+func IsSyncGrpcEnabled() bool {
+	return viper.GetBool("sync.useGrpc")
+}

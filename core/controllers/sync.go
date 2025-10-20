@@ -15,9 +15,29 @@ import (
 var (
 	syncDownloadSemaphore = semaphore.NewWeighted(utils.GetSyncDownloadMaxConcurrency())
 	syncDownloadInFlight  int64
+	syncScanSemaphore     = semaphore.NewWeighted(10) // Limit concurrent scan requests
+	syncScanInFlight      int64
 )
 
 func GetSyncScan(c *gin.Context) (response *Response[entity.FsFileInfoMap], err error) {
+	ctx := c.Request.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Rate limiting for scan requests
+	if err := syncScanSemaphore.Acquire(ctx, 1); err != nil {
+		logger.Warnf("failed to acquire sync scan slot for id=%s path=%s: %v", c.Param("id"), c.Param("path"), err)
+		return GetErrorResponse[entity.FsFileInfoMap](errors.Annotate(err, "server overloaded, please retry"))
+	}
+	current := atomic.AddInt64(&syncScanInFlight, 1)
+	logger.Debugf("sync scan in-flight=%d id=%s path=%s", current, c.Param("id"), c.Param("path"))
+	defer func() {
+		newVal := atomic.AddInt64(&syncScanInFlight, -1)
+		logger.Debugf("sync scan completed in-flight=%d id=%s path=%s", newVal, c.Param("id"), c.Param("path"))
+		syncScanSemaphore.Release(1)
+	}()
+
 	workspacePath := utils.GetWorkspace()
 	dirPath := filepath.Join(workspacePath, c.Param("id"), c.Param("path"))
 	files, err := utils.ScanDirectory(dirPath)

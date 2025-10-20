@@ -31,13 +31,22 @@ var (
 	jitterMutex    sync.Mutex
 )
 
-// syncFiles synchronizes files between master and worker nodes:
+// syncFiles synchronizes files between master and worker nodes.
+// It switches between gRPC streaming and HTTP based on the feature flag.
+func (r *Runner) syncFiles() (err error) {
+	if utils.IsSyncGrpcEnabled() {
+		return r.syncFilesGRPC()
+	}
+	return r.syncFilesHTTP()
+}
+
+// syncFilesHTTP synchronizes files using HTTP/JSON (legacy implementation):
 // 1. Gets file list from master
 // 2. Compares with local files
 // 3. Downloads new/modified files
 // 4. Deletes files that no longer exist on master
-func (r *Runner) syncFiles() (err error) {
-	r.Infof("starting file synchronization for spider: %s", r.s.Id.Hex())
+func (r *Runner) syncFilesHTTP() (err error) {
+	r.Infof("starting HTTP file synchronization for spider: %s", r.s.Id.Hex())
 
 	workingDir := ""
 	if !r.s.GitId.IsZero() {
@@ -56,6 +65,21 @@ func (r *Runner) syncFiles() (err error) {
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Validate Content-Type to detect non-JSON responses early
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "application/json") {
+		r.Errorf("unexpected Content-Type: %s (expected application/json)", contentType)
+		r.Errorf("URL: %s, Status: %d", resp.Request.URL.String(), resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		if len(body) > 500 {
+			r.Errorf("Response preview: %s...", string(body[:500]))
+		} else {
+			r.Errorf("Response body: %s", string(body))
+		}
+		return fmt.Errorf("master returned non-JSON response (Content-Type: %s, Status: %d)", contentType, resp.StatusCode)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		r.Errorf("error reading response body: %v", err)
@@ -68,6 +92,12 @@ func (r *Runner) syncFiles() (err error) {
 	if err != nil {
 		r.Errorf("error unmarshaling JSON for URL: %s", resp.Request.URL.String())
 		r.Errorf("error details: %v", err)
+		r.Errorf("response body length: %d bytes", len(body))
+		if len(body) > 500 {
+			r.Errorf("response preview: %s...", string(body[:500]))
+		} else if len(body) > 0 {
+			r.Errorf("response body: %s", string(body))
+		}
 		return err
 	}
 

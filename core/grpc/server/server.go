@@ -32,6 +32,7 @@ type GrpcServer struct {
 	ModelBaseServiceSvr *ModelBaseServiceServer
 	DependencySvr       *DependencyServiceServer
 	MetricSvr           *MetricServiceServer
+	SyncSvr             *SyncServiceServer
 }
 
 func (svr *GrpcServer) Init() {
@@ -89,6 +90,7 @@ func (svr *GrpcServer) register() {
 	grpc2.RegisterTaskServiceServer(svr.svr, svr.TaskSvr)
 	grpc2.RegisterDependencyServiceServer(svr.svr, svr.DependencySvr)
 	grpc2.RegisterMetricServiceServer(svr.svr, svr.MetricSvr)
+	grpc2.RegisterSyncServiceServer(svr.svr, svr.SyncSvr)
 }
 
 func (svr *GrpcServer) recoveryHandlerFunc(p interface{}) (err error) {
@@ -109,6 +111,7 @@ func newGrpcServer() *GrpcServer {
 	svr.TaskSvr = GetTaskServiceServer()
 	svr.DependencySvr = GetDependencyServer()
 	svr.MetricSvr = GetMetricsServer()
+	svr.SyncSvr = GetSyncServiceServer()
 
 	// recovery options
 	recoveryOpts := []grpcrecovery.Option{

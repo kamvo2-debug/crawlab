@@ -90,6 +90,7 @@ type GrpcClient struct {
 	modelBaseServiceClient grpc2.ModelBaseServiceClient
 	dependencyClient       grpc2.DependencyServiceClient
 	metricClient           grpc2.MetricServiceClient
+	syncClient             grpc2.SyncServiceClient
 
 	// Add new fields for state management
 	state     connectivity.State
@@ -218,6 +219,7 @@ func (c *GrpcClient) register() {
 	c.taskClient = grpc2.NewTaskServiceClient(c.conn)
 	c.dependencyClient = grpc2.NewDependencyServiceClient(c.conn)
 	c.metricClient = grpc2.NewMetricServiceClient(c.conn)
+	c.syncClient = grpc2.NewSyncServiceClient(c.conn)
 	c.healthClient = grpc_health_v1.NewHealthClient(c.conn)
 
 	// Enable health checks by default for new connections
@@ -498,6 +500,21 @@ func (c *GrpcClient) GetMetricClient() (grpc2.MetricServiceClient, error) {
 	return c.GetMetricClientWithContext(ctx)
 }
 
+func (c *GrpcClient) GetSyncClient() (grpc2.SyncServiceClient, error) {
+	// Use longer timeout during reconnection scenarios
+	timeout := defaultClientTimeout
+	c.reconnectMux.Lock()
+	if c.reconnecting {
+		timeout = reconnectionClientTimeout
+	}
+	c.reconnectMux.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return c.GetSyncClientWithContext(ctx)
+}
+
 // Safe client getters with timeout - these methods will wait up to the specified timeout
 // for registration to complete before returning an error
 
@@ -646,6 +663,14 @@ func (c *GrpcClient) GetMetricClientWithContext(ctx context.Context) (grpc2.Metr
 		return nil, err
 	}
 	return client.(grpc2.MetricServiceClient), nil
+}
+
+func (c *GrpcClient) GetSyncClientWithContext(ctx context.Context) (grpc2.SyncServiceClient, error) {
+	client, err := c.getClientWithContext(ctx, func() interface{} { return c.syncClient }, "sync")
+	if err != nil {
+		return nil, err
+	}
+	return client.(grpc2.SyncServiceClient), nil
 }
 
 func (c *GrpcClient) getClientWithContext(ctx context.Context, getter func() interface{}, clientType string) (interface{}, error) {
