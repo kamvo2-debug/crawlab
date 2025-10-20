@@ -1,8 +1,9 @@
 package controllers
 
 import (
-	"github.com/gin-gonic/gin"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
 func GetHealthFn(healthFn func() bool) func(c *gin.Context) {
@@ -10,6 +11,7 @@ func GetHealthFn(healthFn func() bool) func(c *gin.Context) {
 		if healthFn() {
 			_, _ = c.Writer.Write([]byte("ok"))
 			c.AbortWithStatus(http.StatusOK)
+			return
 		}
 		_, _ = c.Writer.Write([]byte("not ready"))
 		c.AbortWithStatus(http.StatusServiceUnavailable)
