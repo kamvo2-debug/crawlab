@@ -217,9 +217,13 @@ func (svc *Service) processFetchCycle() error {
 		return fmt.Errorf("failed to get current node: %w", err)
 	}
 
+	// Log node status for debugging reconnection issues
+	svc.Debugf("[TIMING] Node status check: Active=%v, Enabled=%v, Status=%s",
+		n.Active, n.Enabled, n.Status)
+
 	// skip if node is not active or enabled
 	if !n.Active || !n.Enabled {
-		return fmt.Errorf("node not active or enabled")
+		return fmt.Errorf("node not active or enabled (active=%v, enabled=%v)", n.Active, n.Enabled)
 	}
 
 	// validate if max runners is reached (max runners = 0 means no limit)

@@ -252,6 +252,8 @@ func (svc *MasterService) setWorkerNodeOnline(node *models.Node) {
 		return
 	}
 
+	svc.Infof("[TIMING] Starting setWorkerNodeOnline for node[%s]", node.Key)
+
 	oldStatus := node.Status
 	node.Status = constants.NodeStatusOnline
 	node.Active = true
@@ -264,6 +266,8 @@ func (svc *MasterService) setWorkerNodeOnline(node *models.Node) {
 		return
 	}
 
+	svc.Infof("[TIMING] Completed database update for node[%s] - Active=%v, Enabled=%v, Status=%s",
+		node.Key, node.Active, node.Enabled, node.Status)
 	svc.Infof("worker node[%s] status changed from '%s' to 'online'", node.Key, oldStatus)
 
 	// send notification if status changed
