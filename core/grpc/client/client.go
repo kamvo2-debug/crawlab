@@ -20,16 +20,17 @@ import (
 
 // Circuit breaker constants
 const (
-	maxFailures               = 5
-	cbResetTime               = 2 * time.Minute
-	cbHalfOpenRetryInterval   = 30 * time.Second
-	healthCheckInterval       = 2 * time.Minute // Reduced frequency from 30 seconds
-	stateMonitorInterval      = 5 * time.Second
-	registrationCheckInterval = 100 * time.Millisecond
-	idleGracePeriod           = 2 * time.Minute // Increased from 30 seconds
-	connectionTimeout         = 30 * time.Second
-	defaultClientTimeout      = 15 * time.Second // Increased from 5s for better reconnection handling
-	reconnectionClientTimeout = 60 * time.Second // Extended timeout during reconnection scenarios
+	maxFailures                  = 5
+	cbResetTime                  = 2 * time.Minute
+	cbHalfOpenRetryInterval      = 30 * time.Second
+	healthCheckInterval          = 2 * time.Minute // Reduced frequency from 30 seconds
+	stateMonitorInterval         = 5 * time.Second
+	registrationCheckInterval    = 100 * time.Millisecond
+	idleGracePeriod              = 2 * time.Minute // Increased from 30 seconds
+	connectionTimeout            = 30 * time.Second
+	defaultClientTimeout         = 15 * time.Second // Increased from 5s for better reconnection handling
+	reconnectionClientTimeout    = 90 * time.Second // Extended timeout during reconnection scenarios (must be > worker reset timeout)
+	connectionStabilizationDelay = 2 * time.Second  // Wait after reconnection before declaring success
 )
 
 // Circuit breaker states
@@ -47,6 +48,54 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// RetryWithBackoff retries an operation up to maxAttempts times with exponential backoff.
+// It detects "reconnection in progress" errors and retries appropriately.
+// Returns the last error if all attempts fail, or nil on success.
+func RetryWithBackoff(ctx context.Context, operation func() error, maxAttempts int, logger interfaces.Logger, operationName string) error {
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 1s, 2s, 4s, ...
+			backoffDelay := time.Duration(1<<uint(attempt-1)) * time.Second
+			if logger != nil {
+				logger.Debugf("retrying %s after %v (attempt %d/%d)", operationName, backoffDelay, attempt+1, maxAttempts)
+			}
+
+			select {
+			case <-ctx.Done():
+				if logger != nil {
+					logger.Debugf("%s retry cancelled due to context", operationName)
+				}
+				return ctx.Err()
+			case <-time.After(backoffDelay):
+			}
+		}
+
+		err := operation()
+		if err == nil {
+			if attempt > 0 && logger != nil {
+				logger.Infof("%s succeeded after %d attempts", operationName, attempt+1)
+			}
+			return nil
+		}
+
+		lastErr = err
+		// Check if error indicates reconnection in progress
+		if strings.Contains(err.Error(), "reconnection in progress") {
+			if logger != nil {
+				logger.Debugf("%s waiting for reconnection (attempt %d/%d): %v", operationName, attempt+1, maxAttempts, err)
+			}
+			continue
+		}
+
+		if logger != nil {
+			logger.Debugf("%s failed (attempt %d/%d): %v", operationName, attempt+1, maxAttempts, err)
+		}
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %v", operationName, maxAttempts, lastErr)
 }
 
 // GrpcClient provides a robust gRPC client with connection management and client registration.
@@ -695,12 +744,17 @@ func (c *GrpcClient) getClientWithContext(ctx context.Context, getter func() int
 		select {
 		case <-ctx.Done():
 			if isReconnecting {
-				return nil, fmt.Errorf("context cancelled while waiting for %s client registration during reconnection (this is normal during network restoration)", clientType)
+				return nil, fmt.Errorf("context cancelled while waiting for %s client registration: reconnection in progress, retry recommended", clientType)
 			}
 			return nil, fmt.Errorf("context cancelled while waiting for %s client registration", clientType)
 		case <-c.stop:
 			return nil, fmt.Errorf("client stopped while waiting for %s client registration", clientType)
 		case <-ticker.C:
+			// Update reconnection status in case it changed
+			c.reconnectMux.Lock()
+			isReconnecting = c.reconnecting
+			c.reconnectMux.Unlock()
+
 			if c.IsRegistered() {
 				return getter(), nil
 			}
@@ -771,6 +825,18 @@ func (c *GrpcClient) executeReconnection() {
 	} else {
 		c.recordSuccess()
 		c.Infof("reconnection successful - connection state: %s, registered: %v", c.getState(), c.IsRegistered())
+
+		// Stabilization: wait a moment to ensure connection is truly stable
+		// This prevents immediate flapping if the network is still unstable
+		c.Debugf("stabilizing connection for %v", connectionStabilizationDelay)
+		time.Sleep(connectionStabilizationDelay)
+
+		// Verify connection is still stable after delay
+		if c.conn != nil && c.conn.GetState() == connectivity.Ready {
+			c.Infof("connection stabilization successful")
+		} else {
+			c.Warnf("connection became unstable during stabilization")
+		}
 	}
 }
 

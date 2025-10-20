@@ -338,18 +338,25 @@ func (svc *WorkerService) subscribe() {
 }
 
 func (svc *WorkerService) sendHeartbeat() {
-	ctx, cancel := context.WithTimeout(svc.ctx, svc.heartbeatInterval)
+	// Use extended timeout to allow for reconnection scenarios
+	ctx, cancel := context.WithTimeout(svc.ctx, 30*time.Second)
 	defer cancel()
-	nodeClient, err := client.GetGrpcClient().GetNodeClient()
+
+	// Retry up to 3 times with exponential backoff for reconnection scenarios
+	err := client.RetryWithBackoff(ctx, func() error {
+		nodeClient, err := client.GetGrpcClient().GetNodeClient()
+		if err != nil {
+			return err
+		}
+
+		_, err = nodeClient.SendHeartbeat(ctx, &grpc.NodeServiceSendHeartbeatRequest{
+			NodeKey: svc.cfgSvc.GetNodeKey(),
+		})
+		return err
+	}, 3, svc.Logger, "heartbeat")
+
 	if err != nil {
-		svc.Errorf("failed to get node client: %v", err)
-		return
-	}
-	_, err = nodeClient.SendHeartbeat(ctx, &grpc.NodeServiceSendHeartbeatRequest{
-		NodeKey: svc.cfgSvc.GetNodeKey(),
-	})
-	if err != nil {
-		svc.Errorf("failed to send heartbeat to master: %v", err)
+		svc.Errorf("failed to send heartbeat: %v", err)
 	}
 }
 

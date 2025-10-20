@@ -438,15 +438,25 @@ func (svc *Service) updateNodeStatus() (err error) {
 	currentGoroutines := runtime.NumGoroutine()
 	svc.Debugf("Node status update - runners: %d, goroutines: %d", n.CurrentRunners, currentGoroutines)
 
-	// save node
+	// save node with retry for reconnection scenarios
 	n.SetUpdated(n.CreatedBy)
 	if svc.cfgSvc.IsMaster() {
 		err = service.NewModelService[models.Node]().ReplaceById(n.Id, *n)
+		if err != nil {
+			return err
+		}
 	} else {
-		err = client.NewModelService[models.Node]().ReplaceById(n.Id, *n)
-	}
-	if err != nil {
-		return err
+		// Worker node: use gRPC with retry logic
+		ctx, cancel := context.WithTimeout(svc.ctx, 30*time.Second)
+		defer cancel()
+
+		err = grpcclient.RetryWithBackoff(ctx, func() error {
+			return client.NewModelService[models.Node]().ReplaceById(n.Id, *n)
+		}, 3, svc.Logger, "node status update")
+
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
