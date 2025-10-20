@@ -1059,6 +1059,9 @@ var _clientOnce sync.Once
 var _clientMux sync.Mutex
 
 func GetGrpcClient() *GrpcClient {
+	_clientMux.Lock()
+	defer _clientMux.Unlock()
+
 	_clientOnce.Do(func() {
 		_client = newGrpcClient()
 		go _client.Start()
