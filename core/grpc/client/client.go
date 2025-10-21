@@ -817,7 +817,7 @@ func (c *GrpcClient) executeReconnection() {
 		c.Errorf("reconnection failed: %v", err)
 		c.recordFailure()
 
-		// Clear reconnecting flag on failure
+		// Clear reconnecting flag on failure so we can retry
 		c.reconnectMux.Lock()
 		c.reconnecting = false
 		c.reconnectMux.Unlock()
@@ -826,6 +826,16 @@ func (c *GrpcClient) executeReconnection() {
 		backoffDuration := c.calculateBackoff()
 		c.Warnf("will retry reconnection after %v backoff", backoffDuration)
 		time.Sleep(backoffDuration)
+
+		// Trigger another reconnection attempt after backoff
+		// This ensures we keep trying even if network was down during first attempt
+		c.Debugf("backoff complete, triggering reconnection retry")
+		select {
+		case c.reconnect <- struct{}{}:
+			c.Debugf("reconnection retry triggered")
+		default:
+			c.Debugf("reconnection retry already pending")
+		}
 	} else {
 		c.recordSuccess()
 		c.Infof("reconnection successful - connection state: %s, registered: %v", c.getState(), c.IsRegistered())
