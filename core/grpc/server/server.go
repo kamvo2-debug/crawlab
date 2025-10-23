@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/crawlab-team/crawlab/core/grpc/middlewares"
 	"github.com/crawlab-team/crawlab/core/interfaces"
@@ -14,6 +15,7 @@ import (
 	grpcrecovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
 	errors2 "github.com/pkg/errors"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 type GrpcServer struct {
@@ -118,7 +120,9 @@ func newGrpcServer() *GrpcServer {
 		grpcrecovery.WithRecoveryHandler(svr.recoveryHandlerFunc),
 	}
 
-	// grpc server
+	// grpc server with keepalive parameters
+	// These settings must be compatible with client keepalive parameters
+	// to prevent connection timeouts after network disconnection/reconnection
 	svr.svr = grpc.NewServer(
 		grpcmiddleware.WithUnaryServerChain(
 			grpcrecovery.UnaryServerInterceptor(recoveryOpts...),
@@ -128,6 +132,16 @@ func newGrpcServer() *GrpcServer {
 			grpcrecovery.StreamServerInterceptor(recoveryOpts...),
 			grpcauth.StreamServerInterceptor(middlewares.GetGrpcServerAuthTokenFunc()),
 		),
+		// Server-side keepalive enforcement
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second, // Minimum time clients can send keepalive pings
+			PermitWithoutStream: true,             // Allow keepalive pings even without active streams
+		}),
+		// Server-side keepalive parameters
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    20 * time.Second, // Send keepalive ping if no activity for 20s (matches client)
+			Timeout: 5 * time.Second,  // Wait 5s for ping response before closing connection (matches client)
+		}),
 	)
 
 	// initialize
