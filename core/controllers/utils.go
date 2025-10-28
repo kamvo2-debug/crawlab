@@ -259,7 +259,8 @@ func GetSortsOption(c *gin.Context) (sort bson.D, err error) {
 func MustGetSortOption(c *gin.Context) (sort bson.D) {
 	sort, err := GetSortsOption(c)
 	if err != nil {
-		return nil
+		// Return default sort by _id descending when parsing fails
+		return bson.D{{"_id", -1}}
 	}
 	return sort
 }

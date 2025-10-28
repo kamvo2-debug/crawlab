@@ -491,6 +491,9 @@ func GetPaginationPipeline(query bson.M, sort bson.D, skip, limit int) []bson.D 
 	if query == nil {
 		query = bson.M{}
 	}
+	if sort == nil {
+		sort = bson.D{{"_id", -1}}
+	}
 	return []bson.D{
 		{{Key: "$match", Value: query}},
 		{{Key: "$sort", Value: sort}},
