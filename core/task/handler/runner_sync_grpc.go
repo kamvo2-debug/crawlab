@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/crawlab-team/crawlab/core/entity"
@@ -185,7 +186,7 @@ func (r *Runner) downloadFileGRPC(client grpc2.SyncServiceClient, spiderId, path
 	targetPath := fmt.Sprintf("%s/%s", r.cwd, path)
 
 	// Create directory if not exists
-	targetDir := targetPath[:len(targetPath)-len(path)]
+	targetDir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(targetDir, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
