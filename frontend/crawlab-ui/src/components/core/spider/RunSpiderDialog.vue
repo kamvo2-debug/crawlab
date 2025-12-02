@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeMount, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useStore } from 'vuex';
 import useSpider from '@/components/core/spider/useSpider';
 import useNode from '@/components/core/node/useNode';
@@ -88,8 +88,19 @@ const updateOptions = () => {
   options.value = getOptions();
 };
 
-watch(() => form.value, updateOptions);
-onBeforeMount(updateOptions);
+// Watch specific form fields instead of entire form object to prevent
+// excessive re-renders with complex git spider objects
+watch(
+  () => [
+    form.value?.mode,
+    form.value?.cmd,
+    form.value?.param,
+    form.value?.priority,
+    form.value?.node_ids,
+  ],
+  updateOptions,
+  { immediate: true }
+);
 defineOptions({ name: 'ClRunSpiderDialog' });
 </script>
 

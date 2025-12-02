@@ -20,11 +20,11 @@ const { get } = useRequest();
 const store = useStore();
 
 // use node
-const { allNodesSorted: allNodes } = useNode(store);
+const { activeNodesSorted: activeNodes, allNodesSorted: allNodes } = useNode(store);
 
 const toRunNodes = computed(() => {
   const { mode, node_ids } = form.value;
-  return getToRunNodes(mode, node_ids, allNodes.value);
+  return getToRunNodes(mode, node_ids, activeNodes.value);
 });
 
 // use spider
@@ -253,7 +253,7 @@ defineOptions({ name: 'ClSpiderForm' });
         :placeholder="t('components.spider.form.selectedNodes')"
       >
         <el-option
-          v-for="n in allNodes"
+          v-for="n in activeNodes"
           :key="n.key"
           :value="n._id"
           :label="n.name"
@@ -261,14 +261,7 @@ defineOptions({ name: 'ClSpiderForm' });
           <span style="margin-right: 5px">
             <cl-node-tag :node="n" icon-only />
           </span>
-          <span>
-            {{
-              n.name +
-              (n.active
-                ? ''
-                : ` (${t('components.node.nodeStatus.label.offline')})`)
-            }}
-          </span>
+          <span>{{ n.name }}</span>
         </el-option>
       </el-select>
     </cl-form-item>

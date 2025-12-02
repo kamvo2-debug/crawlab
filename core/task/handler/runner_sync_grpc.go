@@ -33,9 +33,19 @@ func (r *Runner) syncFilesGRPC() (err error) {
 		return err
 	}
 
+	// Determine the ID to use for sync request
+	// For git spiders, use GitId (where files are stored)
+	// For regular spiders, use SpiderId
+	var syncId string
+	if r.s.GitId.IsZero() {
+		syncId = r.s.Id.Hex()
+	} else {
+		syncId = r.s.GitId.Hex()
+	}
+
 	// Prepare request
 	req := &grpc2.FileSyncRequest{
-		SpiderId: r.s.Id.Hex(),
+		SpiderId: syncId,
 		Path:     workingDir,
 		NodeKey:  utils.GetNodeKey(),
 	}
@@ -149,7 +159,13 @@ func (r *Runner) syncFilesGRPC() (err error) {
 		}
 
 		if needsDownload {
-			if err := r.downloadFileGRPC(syncClient, r.s.Id.Hex(), path); err != nil {
+			// For git spiders with sub-folders, prepend GitRootPath to the download path
+			// because the server stores files at workspace/{git_id}/{git_root_path}/...
+			downloadPath := path
+			if workingDir != "" {
+				downloadPath = filepath.Join(workingDir, path)
+			}
+			if err := r.downloadFileGRPC(syncClient, syncId, downloadPath); err != nil {
 				r.Errorf("error downloading file %s: %v", path, err)
 				return err
 			}

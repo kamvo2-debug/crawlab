@@ -22,7 +22,7 @@ const {
 } = useSchedule(store);
 
 // use node
-const { allNodesSorted: allNodes } = useNode(store);
+const { activeNodesSorted: activeNodes } = useNode(store);
 
 // on enabled change
 const onEnabledChange = async (value: boolean) => {
@@ -201,7 +201,7 @@ defineOptions({ name: 'ClScheduleForm' });
         :placeholder="t('components.schedule.form.selectedNodes')"
       >
         <el-option
-          v-for="n in allNodes"
+          v-for="n in activeNodes"
           :key="n.key"
           :value="n._id"
           :label="n.name"
