@@ -140,7 +140,7 @@ const useGitDetail = () => {
         ElMessage.success(t('components.git.common.message.success.pull'));
       }
       if (activeTabName.value === TAB_NAME_FILES) {
-        await store.dispatch(`${ns}/listDir`, { id: id.value });
+        await store.dispatch(`${ns}/listDir`, { id: id.value, path: '/' });
       } else if (activeTabName.value === TAB_NAME_LOGS) {
         await store.dispatch(`${ns}/getLogs`, { id: id.value });
       }
