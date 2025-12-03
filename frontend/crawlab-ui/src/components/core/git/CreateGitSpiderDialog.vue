@@ -71,7 +71,7 @@ watch(gitRootPath, () => {
 });
 watch(visible, () => {
   if (visible.value) {
-    store.dispatch(`${nsGit}/listDir`, { id: activeId.value });
+    store.dispatch(`${nsGit}/listDir`, { id: activeId.value, path: '/' });
     gitRootPath.value = gitState.activeFileNavItem?.path || FILE_ROOT;
     const name = [gitState.form.name, gitRootPath.value]
       .filter(f => f !== FILE_ROOT)
