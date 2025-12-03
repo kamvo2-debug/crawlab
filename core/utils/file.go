@@ -187,7 +187,7 @@ func GetFileHash(filePath string) (res string, err error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-const IgnoreFileRegexPattern = `(^node_modules|__pycache__)/|\.(tmp|temp|log|swp|swo|bak|orig|lock|pid|pyc|pyo)$`
+const IgnoreFileRegexPattern = `(^\.git|^node_modules|__pycache__)/|\.(tmp|temp|log|swp|swo|bak|orig|lock|pid|pyc|pyo)$`
 const scanDirectoryCacheTTL = 3 * time.Second
 
 var (
